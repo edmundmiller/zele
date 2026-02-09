@@ -2,7 +2,7 @@
     <br/>
     <br/>
     <h3>zele</h3>
-    <p>Gmail CLI to manage emails & calendar from your terminal. For you and your agents</p>
+    <p>Manage emails & calendar from your terminal. For you and your agents</p>
     <br/>
     <br/>
 </div>
