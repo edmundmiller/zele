@@ -159,6 +159,57 @@ export function formatDate(dateStr: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Calendar event time formatting
+// ---------------------------------------------------------------------------
+
+/**
+ * Format event start/end times for display.
+ * Same day: "Feb 10, 2:00 - 3:00 PM"
+ * Different days: "Feb 10, 2:00 PM - Feb 11, 10:00 AM"
+ * All-day single: "Feb 10"
+ * All-day multi: "Feb 10 - Feb 12"
+ */
+export function formatEventTime(start: string, end: string, allDay = false): { start: string; end: string } {
+  if (allDay) {
+    const startDate = new Date(start + 'T00:00:00')
+    const endDate = new Date(end + 'T00:00:00')
+    // Calendar API uses exclusive end date for all-day events
+    endDate.setDate(endDate.getDate() - 1)
+
+    const fmt = (d: Date) => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+
+    if (startDate.getTime() === endDate.getTime()) {
+      const s = fmt(startDate)
+      return { start: s, end: s }
+    }
+    return { start: fmt(startDate), end: fmt(endDate) }
+  }
+
+  const startDate = new Date(start)
+  const endDate = new Date(end)
+
+  const timeOpts: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' }
+  const dateTimeOpts: Intl.DateTimeFormatOptions = { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }
+
+  const sameDay = startDate.toDateString() === endDate.toDateString()
+
+  if (sameDay) {
+    const dateStr = startDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    const startTime = startDate.toLocaleTimeString(undefined, timeOpts)
+    const endTime = endDate.toLocaleTimeString(undefined, timeOpts)
+    return {
+      start: `${dateStr}, ${startTime}`,
+      end: endTime,
+    }
+  }
+
+  return {
+    start: startDate.toLocaleString(undefined, dateTimeOpts),
+    end: endDate.toLocaleString(undefined, dateTimeOpts),
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Sender formatting
 // ---------------------------------------------------------------------------
 

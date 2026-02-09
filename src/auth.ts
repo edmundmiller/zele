@@ -16,6 +16,7 @@ import fkill from 'fkill'
 import pc from 'picocolors'
 import { getPrisma } from './db.js'
 import { GmailClient } from './gmail-client.js'
+import { CalendarClient } from './calendar-client.js'
 
 // ---------------------------------------------------------------------------
 // Config
@@ -24,12 +25,42 @@ import { GmailClient } from './gmail-client.js'
 const ZELE_DIR = path.join(os.homedir(), '.zele')
 const LEGACY_TOKENS_FILE = path.join(ZELE_DIR, 'tokens.json')
 
+// ---------------------------------------------------------------------------
+// Known open-source Google OAuth clients (Desktop app type).
+// All support localhost + OOB redirects. All have Gmail, Calendar, Drive,
+// Contacts, Tasks, and other Google API scopes enabled.
+// None support device code flow (requires "TVs and Limited Input" client type,
+// which Google restricts — Gmail scopes are blocked from device code entirely).
+// Source: public open-source repos, tested 2026-02-09.
+// ---------------------------------------------------------------------------
+const OAUTH_CLIENTS = {
+  // Mozilla Thunderbird — largest user base, highest Google quota.
+  // Source: searchfox.org/comm-central/source/mailnews/base/src/OAuth2Providers.sys.mjs
+  thunderbird: {
+    clientId: '406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com',
+    clientSecret: 'kSmqreRr0qwBWJgbf5Y-PjSU',
+  },
+  // GNOME Online Accounts — used by Evolution, GNOME Calendar, Nautilus (Drive).
+  // Source: github.com/GNOME/gnome-online-accounts/blob/master/meson_options.txt
+  gnome: {
+    clientId: '44438659992-7kgjeitenc16ssihbtdjbgguch7ju55s.apps.googleusercontent.com',
+    clientSecret: '-gMLuQyDiI0XrQS_vx_mhuYF',
+  },
+  // KDE KAccounts — used by KMail, KOrganizer, Kontact.
+  // Source: github.com/KDE/kaccounts-providers google.provider.in
+  kde: {
+    clientId: '317066460457-pkpkedrvt2ldq6g2hj1egfka2n7vpuoo.apps.googleusercontent.com',
+    clientSecret: 'Y8eFAaWfcanV3amZdDvtbYUq',
+  },
+} as const
+
+const ACTIVE_CLIENT = OAUTH_CLIENTS.thunderbird
+
 const CLIENT_ID =
-  process.env.ZELE_CLIENT_ID ??
-  '406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com'
+  process.env.ZELE_CLIENT_ID ?? ACTIVE_CLIENT.clientId
 
 const CLIENT_SECRET =
-  process.env.ZELE_CLIENT_SECRET ?? 'kSmqreRr0qwBWJgbf5Y-PjSU'
+  process.env.ZELE_CLIENT_SECRET ?? ACTIVE_CLIENT.clientSecret
 
 const REDIRECT_PORT = 8089
 const SCOPES = [
@@ -330,6 +361,62 @@ export async function getClient(
   accounts?: string[],
 ): Promise<{ email: string; client: GmailClient }> {
   const clients = await getClients(accounts)
+  if (clients.length === 1) {
+    return clients[0]!
+  }
+
+  const emails = clients.map((c) => c.email).join('\n  ')
+  throw new Error(
+    `Multiple accounts matched. Specify --account:\n  ${emails}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Calendar client helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Get authenticated CalendarClient instances for all accounts (or filtered by email list).
+ */
+export async function getCalendarClients(
+  accounts?: string[],
+): Promise<Array<{ email: string; client: CalendarClient }>> {
+  await migrateLegacyTokens()
+
+  const allEmails = await listAccounts()
+  if (allEmails.length === 0) {
+    throw new Error('No accounts registered. Run: zele auth login')
+  }
+
+  const emails = accounts && accounts.length > 0
+    ? allEmails.filter((e) => accounts.includes(e))
+    : allEmails
+
+  if (emails.length === 0) {
+    const available = allEmails.join(', ')
+    throw new Error(`No matching accounts. Available: ${available}`)
+  }
+
+  const results = await Promise.all(
+    emails.map(async (email) => {
+      const auth = await authenticateAccount(email)
+      const { token } = await auth.getAccessToken()
+      if (!token) throw new Error(`Failed to get access token for ${email}`)
+      return { email, client: new CalendarClient({ accessToken: token, email }) }
+    }),
+  )
+
+  return results
+}
+
+/**
+ * Get a single authenticated CalendarClient. Errors if multiple accounts exist
+ * and no --account filter was provided.
+ */
+export async function getCalendarClient(
+  accounts?: string[],
+): Promise<{ email: string; client: CalendarClient }> {
+  const clients = await getCalendarClients(accounts)
   if (clients.length === 1) {
     return clients[0]!
   }
