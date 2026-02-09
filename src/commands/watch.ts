@@ -7,7 +7,8 @@
 import type { Goke } from 'goke'
 import { z } from 'zod'
 import { getClients } from '../auth.js'
-import { GmailClient } from '../gmail-client.js'
+import type { GmailClient } from '../gmail-client.js'
+import { mapConcurrent } from '../api-utils.js'
 import * as cache from '../gmail-cache.js'
 import * as out from '../output.js'
 
@@ -44,6 +45,12 @@ export function registerWatchCommands(cli: Goke) {
 
       const folder = options.folder ?? 'inbox'
       const filterLabelId = FOLDER_LABELS[folder]
+
+      if (!filterLabelId) {
+        out.error(`Unsupported folder for watch: "${folder}". Supported: ${Object.keys(FOLDER_LABELS).join(', ')}`)
+        process.exit(1)
+      }
+
       const clients = await getClients(options.account)
 
       // Seed historyId for each account
@@ -76,22 +83,31 @@ export function registerWatchCommands(cli: Goke) {
 
       // Poll loop
       while (running) {
-        const allItems: Array<Record<string, unknown>> = []
-
-        for (const state of states) {
-          try {
-            const items = await pollAccount(state, filterLabelId, options.query)
-            allItems.push(...items)
-          } catch (err: any) {
-            // historyId expired — Google only keeps ~7 days
-            if (isHistoryExpired(err)) {
-              out.hint(`${state.email}: history expired, re-seeding...`)
-              const profile = await state.client.getProfile()
-              state.historyId = profile.historyId
-              await cache.setLastHistoryId(state.email, state.historyId)
-            } else {
-              out.error(`${state.email}: ${err.message ?? err}`)
+        const settled = await Promise.allSettled(
+          states.map(async (state) => {
+            try {
+              return await pollAccount(state, filterLabelId, options.query)
+            } catch (err: any) {
+              // historyId expired — Google only keeps ~7 days
+              if (isHistoryExpired(err)) {
+                out.hint(`${state.email}: history expired, re-seeding...`)
+                const profile = await state.client.getProfile()
+                state.historyId = profile.historyId
+                await cache.setLastHistoryId(state.email, state.historyId)
+                // Retry once after reseed (important for --once mode)
+                return await pollAccount(state, filterLabelId, options.query)
+              }
+              throw err
             }
+          }),
+        )
+
+        const allItems: Array<Record<string, unknown>> = []
+        for (const result of settled) {
+          if (result.status === 'fulfilled' && result.value) {
+            allItems.push(...result.value)
+          } else if (result.status === 'rejected') {
+            out.error(`${result.reason?.message ?? result.reason}`)
           }
         }
 
@@ -112,7 +128,7 @@ export function registerWatchCommands(cli: Goke) {
 
 async function pollAccount(
   state: { email: string; client: GmailClient; historyId: string },
-  filterLabelId: string | undefined,
+  filterLabelId: string,
   query: string | undefined,
 ): Promise<Array<Record<string, unknown>>> {
   const { history, historyId: newHistoryId } = await state.client.listHistory({
@@ -129,7 +145,10 @@ async function pollAccount(
 
   if (history.length === 0) return []
 
-  // Collect unique message IDs from messageAdded events
+  // Collect unique message IDs from messageAdded events.
+  // No client-side label filtering here — listHistory already filters by
+  // labelId server-side, and the partial message objects in history responses
+  // often have incomplete/missing labelIds.
   const seenIds = new Set<string>()
   const messageIds: string[] = []
 
@@ -137,10 +156,6 @@ async function pollAccount(
     for (const added of entry.messagesAdded ?? []) {
       const id = added.message?.id
       if (id && !seenIds.has(id)) {
-        // If filtering by folder label, check the message has that label
-        const labels = added.message?.labelIds ?? []
-        if (filterLabelId && !labels.includes(filterLabelId)) continue
-
         seenIds.add(id)
         messageIds.push(id)
       }
@@ -149,19 +164,17 @@ async function pollAccount(
 
   if (messageIds.length === 0) return []
 
-  // Hydrate messages with metadata
-  const items: Array<Record<string, unknown>> = []
-
-  for (const msgId of messageIds) {
+  // Hydrate messages with metadata (bounded concurrency)
+  const hydrated = await mapConcurrent(messageIds, async (msgId) => {
     try {
       const msg = await state.client.getMessage({ messageId: msgId, format: 'metadata' })
-      if ('raw' in msg) continue // skip raw format responses
+      if ('raw' in msg) return null
 
       // If user specified a query, do a client-side check on subject/from
       // (the history API doesn't support query filtering natively)
-      if (query && !matchesQuery(msg, query)) continue
+      if (query && !matchesQuery(msg, query)) return null
 
-      items.push({
+      return {
         account: state.email,
         type: 'new_message',
         from: out.formatSender(msg.from),
@@ -170,13 +183,16 @@ async function pollAccount(
         thread_id: msg.threadId,
         message_id: msg.id,
         flags: out.formatFlags(msg),
-      })
-    } catch {
-      // Message may have been deleted between history fetch and hydration
+      }
+    } catch (err: any) {
+      const status = err?.code ?? err?.status ?? err?.response?.status
+      if (status === 404) return null // message deleted between history fetch and hydration
+      out.hint(`Failed to fetch message ${msgId}: ${err.message ?? err}`)
+      return null
     }
-  }
+  })
 
-  return items
+  return hydrated.filter((item): item is Record<string, unknown> => item !== null)
 }
 
 // ---------------------------------------------------------------------------
