@@ -215,13 +215,6 @@ export function formatEventTime(start: string, end: string, allDay = false): { s
 
 export function formatSender(sender: { name?: string; email: string }): string {
   if (sender.name && sender.name !== sender.email) {
-    return sender.name
-  }
-  return sender.email
-}
-
-export function formatSenderFull(sender: { name?: string; email: string }): string {
-  if (sender.name && sender.name !== sender.email) {
     return `${sender.name} <${sender.email}>`
   }
   return sender.email

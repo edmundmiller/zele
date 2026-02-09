@@ -220,7 +220,7 @@ export function registerMailCommands(cli: Goke) {
 
       // Render each message
       for (const msg of thread.messages) {
-        const fromStr = out.formatSenderFull(msg.from)
+        const fromStr = out.formatSender(msg.from)
         const dateStr = out.formatDate(msg.date)
         const flags = out.formatFlags(msg)
 
@@ -422,7 +422,7 @@ export function registerMailCommands(cli: Goke) {
         options.body ?? '',
         '',
         '---------- Forwarded message ----------',
-        `From: ${out.formatSenderFull(lastMsg.from)}`,
+        `From: ${out.formatSender(lastMsg.from)}`,
         `Date: ${lastMsg.date}`,
         `Subject: ${lastMsg.subject}`,
         `To: ${lastMsg.to.map((t) => t.email).join(', ')}`,
