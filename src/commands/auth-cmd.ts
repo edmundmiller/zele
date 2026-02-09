@@ -2,7 +2,7 @@
 // Manages OAuth2 authentication for gtui.
 
 import type { Goke } from 'goke'
-import { authenticate, clearTokens, getAuthStatus, loadTokens } from '../auth.js'
+import { authenticate, clearTokens, getAuthStatus } from '../auth.js'
 import { GmailClient } from '../gmail-client.js'
 import * as out from '../output.js'
 
@@ -58,8 +58,7 @@ export function registerAuthCommands(cli: Goke) {
 
   cli
     .command('auth status', 'Show authentication status')
-    .option('--json', 'Output as JSON')
-    .action(async (options: { json?: boolean }) => {
+    .action(async () => {
       const status = getAuthStatus()
 
       // Try to get email if authenticated
@@ -74,20 +73,12 @@ export function registerAuthCommands(cli: Goke) {
         }
       }
 
-      if (options.json) {
-        out.printJson(status)
-        return
-      }
-
       if (status.authenticated) {
-        out.printTable({
-          head: ['Field', 'Value'],
-          rows: [
-            ['Status', 'Authenticated'],
-            ['Email', status.email ?? 'unknown'],
-            ['Expires', status.expiresAt?.toLocaleString() ?? 'unknown'],
-            ['Tokens file', status.tokensFile],
-          ],
+        out.printYaml({
+          status: 'Authenticated',
+          email: status.email ?? 'unknown',
+          expires: status.expiresAt?.toISOString() ?? 'unknown',
+          tokens_file: status.tokensFile,
         })
       } else {
         out.hint('Not authenticated. Run: gtui auth login')

@@ -17,8 +17,7 @@ export function registerAttachmentCommands(cli: Goke) {
 
   cli
     .command('attachment list <messageId>', 'List attachments for a message')
-    .option('--json', 'Output as JSON')
-    .action(async (messageId: string, options: { json?: boolean }) => {
+    .action(async (messageId: string) => {
       const auth = await authenticate()
       const client = new GmailClient({ auth })
 
@@ -30,25 +29,19 @@ export function registerAttachmentCommands(cli: Goke) {
 
       const attachments = msg.attachments
 
-      if (options.json) {
-        out.printJson(attachments)
-        return
-      }
-
       if (attachments.length === 0) {
         out.hint('No attachments')
         return
       }
 
-      out.printTable({
-        head: ['Attachment ID', 'Filename', 'Type', 'Size'],
-        rows: attachments.map((a) => [
-          out.truncate(a.attachmentId, 20),
-          a.filename,
-          a.mimeType,
-          formatSize(a.size),
-        ]),
-      })
+      out.printList(
+        attachments.map((a) => ({
+          attachment_id: a.attachmentId,
+          filename: a.filename,
+          type: a.mimeType,
+          size: formatSize(a.size),
+        })),
+      )
 
       out.hint(`${attachments.length} attachment(s)`)
     })
@@ -61,11 +54,9 @@ export function registerAttachmentCommands(cli: Goke) {
     .command('attachment get <messageId> <attachmentId>', 'Download an attachment')
     .option('--out-dir <outDir>', z.string().default('.').describe('Output directory'))
     .option('--filename <filename>', z.string().describe('Override filename'))
-    .option('--json', 'Output as JSON')
     .action(async (messageId: string, attachmentId: string, options: {
       outDir: string
       filename?: string
-      json?: boolean
     }) => {
       const auth = await authenticate()
       const client = new GmailClient({ auth })
@@ -86,10 +77,7 @@ export function registerAttachmentCommands(cli: Goke) {
       if (fs.existsSync(outPath) && meta) {
         const stat = fs.statSync(outPath)
         if (stat.size === meta.size) {
-          if (options.json) {
-            out.printJson({ path: outPath, cached: true, size: stat.size })
-            return
-          }
+          out.printYaml({ path: outPath, cached: true, size: stat.size })
           out.hint(`Cached: ${outPath}`)
           return
         }
@@ -107,11 +95,7 @@ export function registerAttachmentCommands(cli: Goke) {
 
       fs.writeFileSync(outPath, buffer)
 
-      if (options.json) {
-        out.printJson({ path: outPath, cached: false, size: buffer.length })
-        return
-      }
-
+      out.printYaml({ path: outPath, cached: false, size: buffer.length })
       out.success(`Saved: ${outPath} (${formatSize(buffer.length)})`)
     })
 }

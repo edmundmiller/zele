@@ -1,5 +1,5 @@
 // Profile command: show account info.
-// Displays email address, message/thread counts, and aliases.
+// Displays email address, message/thread counts, and aliases as YAML.
 
 import type { Goke } from 'goke'
 import { authenticate } from '../auth.js'
@@ -10,9 +10,8 @@ import * as out from '../output.js'
 export function registerProfileCommands(cli: Goke) {
   cli
     .command('profile', 'Show Gmail account info')
-    .option('--json', 'Output as JSON')
     .option('--no-cache', 'Skip cache')
-    .action(async (options: { json?: boolean; noCache?: boolean }) => {
+    .action(async (options: { noCache?: boolean }) => {
       const auth = await authenticate()
       const client = new GmailClient({ auth })
       const cache = options.noCache ? null : new GmailCache()
@@ -29,31 +28,16 @@ export function registerProfileCommands(cli: Goke) {
 
       cache?.close()
 
-      if (options.json) {
-        out.printJson({ ...profile, aliases })
-        return
-      }
-
-      out.printTable({
-        head: ['Field', 'Value'],
-        rows: [
-          ['Email', profile.emailAddress],
-          ['Messages (total)', profile.messagesTotal],
-          ['Threads (total)', profile.threadsTotal],
-          ['History ID', profile.historyId],
-        ],
+      out.printYaml({
+        email: profile.emailAddress,
+        messages_total: profile.messagesTotal,
+        threads_total: profile.threadsTotal,
+        history_id: profile.historyId,
+        aliases: aliases.map((a) => ({
+          email: a.email,
+          name: a.name ?? null,
+          primary: a.primary,
+        })),
       })
-
-      if (aliases.length > 1) {
-        process.stdout.write('\n')
-        out.printTable({
-          head: ['Alias', 'Name', 'Primary'],
-          rows: aliases.map((a) => [
-            a.email,
-            a.name ?? '',
-            a.primary ? 'yes' : '',
-          ]),
-        })
-      }
     })
 }

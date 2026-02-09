@@ -1,5 +1,5 @@
 // Label commands: list, get, create, delete, counts.
-// Manages Gmail labels with table output and cache integration.
+// Manages Gmail labels with YAML output and cache integration.
 
 import type { Goke } from 'goke'
 import { z } from 'zod'
@@ -15,9 +15,8 @@ export function registerLabelCommands(cli: Goke) {
 
   cli
     .command('label list', 'List all labels')
-    .option('--json', 'Output as JSON')
     .option('--no-cache', 'Skip cache')
-    .action(async (options: { json?: boolean; noCache?: boolean }) => {
+    .action(async (options: { noCache?: boolean }) => {
       const auth = await authenticate()
       const client = new GmailClient({ auth })
       const cache = options.noCache ? null : new GmailCache()
@@ -31,11 +30,6 @@ export function registerLabelCommands(cli: Goke) {
 
       cache?.close()
 
-      if (options.json) {
-        out.printJson(labels)
-        return
-      }
-
       if (labels.length === 0) {
         out.hint('No labels found')
         return
@@ -47,10 +41,9 @@ export function registerLabelCommands(cli: Goke) {
         return a.name.localeCompare(b.name)
       })
 
-      out.printTable({
-        head: ['ID', 'Name', 'Type'],
-        rows: sorted.map((l) => [l.id, l.name, l.type]),
-      })
+      out.printList(
+        sorted.map((l) => ({ id: l.id, name: l.name, type: l.type })),
+      )
 
       out.hint(`${labels.length} label(s)`)
     })
@@ -61,29 +54,20 @@ export function registerLabelCommands(cli: Goke) {
 
   cli
     .command('label get <labelId>', 'Get label details with counts')
-    .option('--json', 'Output as JSON')
-    .action(async (labelId: string, options: { json?: boolean }) => {
+    .action(async (labelId: string) => {
       const auth = await authenticate()
       const client = new GmailClient({ auth })
 
       const label = await client.getLabel({ labelId })
 
-      if (options.json) {
-        out.printJson(label)
-        return
-      }
-
-      out.printTable({
-        head: ['Field', 'Value'],
-        rows: [
-          ['ID', label.id],
-          ['Name', label.name],
-          ['Type', label.type],
-          ['Messages (total)', label.messagesTotal],
-          ['Messages (unread)', label.messagesUnread],
-          ['Threads (total)', label.threadsTotal],
-          ['Threads (unread)', label.threadsUnread],
-        ],
+      out.printYaml({
+        id: label.id,
+        name: label.name,
+        type: label.type,
+        messages_total: label.messagesTotal,
+        messages_unread: label.messagesUnread,
+        threads_total: label.threadsTotal,
+        threads_unread: label.threadsUnread,
       })
     })
 
@@ -95,11 +79,9 @@ export function registerLabelCommands(cli: Goke) {
     .command('label create <name>', 'Create a new label')
     .option('--bg-color <bgColor>', z.string().describe('Background color (hex, e.g. #4986e7)'))
     .option('--text-color <textColor>', z.string().describe('Text color (hex, e.g. #ffffff)'))
-    .option('--json', 'Output as JSON')
     .action(async (name: string, options: {
       bgColor?: string
       textColor?: string
-      json?: boolean
     }) => {
       const auth = await authenticate()
       const client = new GmailClient({ auth })
@@ -116,12 +98,8 @@ export function registerLabelCommands(cli: Goke) {
       cache.invalidateLabels()
       cache.close()
 
-      if (options.json) {
-        out.printJson(result)
-        return
-      }
-
-      out.success(`Label created: "${result.name}" (ID: ${result.id})`)
+      out.printYaml(result)
+      out.success(`Label created: "${result.name}"`)
     })
 
   // =========================================================================
@@ -131,8 +109,7 @@ export function registerLabelCommands(cli: Goke) {
   cli
     .command('label delete <labelId>', 'Delete a label')
     .option('--force', 'Skip confirmation')
-    .option('--json', 'Output as JSON')
-    .action(async (labelId: string, options: { force?: boolean; json?: boolean }) => {
+    .action(async (labelId: string, options: { force?: boolean }) => {
       if (!options.force && process.stdin.isTTY) {
         const readline = await import('node:readline')
         const rl = readline.createInterface({ input: process.stdin, output: process.stderr })
@@ -158,12 +135,7 @@ export function registerLabelCommands(cli: Goke) {
       cache.invalidateLabelCounts()
       cache.close()
 
-      if (options.json) {
-        out.printJson({ labelId, deleted: true })
-        return
-      }
-
-      out.success(`Label ${labelId} deleted`)
+      out.printYaml({ label_id: labelId, deleted: true })
     })
 
   // =========================================================================
@@ -172,9 +144,8 @@ export function registerLabelCommands(cli: Goke) {
 
   cli
     .command('label counts', 'Show unread counts per label')
-    .option('--json', 'Output as JSON')
     .option('--no-cache', 'Skip cache')
-    .action(async (options: { json?: boolean; noCache?: boolean }) => {
+    .action(async (options: { noCache?: boolean }) => {
       const auth = await authenticate()
       const client = new GmailClient({ auth })
       const cache = options.noCache ? null : new GmailCache()
@@ -188,11 +159,6 @@ export function registerLabelCommands(cli: Goke) {
 
       cache?.close()
 
-      if (options.json) {
-        out.printJson(counts)
-        return
-      }
-
       // Filter to labels with counts > 0 and sort descending
       const withCounts = counts.filter((c) => c.count > 0).sort((a, b) => b.count - a.count)
 
@@ -201,10 +167,8 @@ export function registerLabelCommands(cli: Goke) {
         return
       }
 
-      out.printTable({
-        head: ['Label', 'Count'],
-        rows: withCounts.map((c) => [c.label, c.count]),
-        colAligns: ['left', 'right'],
-      })
+      out.printList(
+        withCounts.map((c) => ({ label: c.label, count: c.count })),
+      )
     })
 }

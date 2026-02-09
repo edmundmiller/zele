@@ -1,14 +1,25 @@
 // Output formatting utilities for gtui CLI.
-// Handles JSON mode, table rendering (cli-table3), date formatting,
+// Handles YAML output with TTY-aware coloring, date formatting,
 // HTML-to-markdown email conversion (turndown), and stderr hints.
 // Follows gogcli pattern: data to stdout, hints/progress to stderr.
+//
+// All structured data is output as YAML (js-yaml). In TTY mode, keys are
+// colored cyan and values are left at the terminal default. In non-TTY mode,
+// colors are disabled so piped output is plain, machine-parseable YAML.
+// Line wrapping is set to Infinity (no folding) everywhere.
 
-import Table from 'cli-table3'
+import yaml from 'js-yaml'
 import TurndownService from 'turndown'
 import pc from 'picocolors'
 
 // ---------------------------------------------------------------------------
-// Turndown instance (HTML → Markdown)
+// TTY detection (used for coloring + wrapping decisions)
+// ---------------------------------------------------------------------------
+
+const isTTY = process.stdout.isTTY ?? false
+
+// ---------------------------------------------------------------------------
+// Turndown instance (HTML -> Markdown)
 // ---------------------------------------------------------------------------
 
 const turndown = new TurndownService({
@@ -47,7 +58,7 @@ turndown.addRule('images', {
 })
 
 // ---------------------------------------------------------------------------
-// HTML → Markdown conversion
+// HTML -> Markdown conversion
 // ---------------------------------------------------------------------------
 
 export function htmlToMarkdown(html: string): string {
@@ -74,60 +85,51 @@ export function renderEmailBody(body: string, mimeType: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// JSON output
+// YAML output
 // ---------------------------------------------------------------------------
 
-export function printJson(data: unknown): void {
-  process.stdout.write(JSON.stringify(data, null, 2) + '\n')
+/**
+ * Colorize a YAML string for TTY output.
+ * List dashes are cyan, keys are dimmed, values stay at terminal default.
+ */
+function colorizeYaml(yamlStr: string): string {
+  return yamlStr.replace(
+    /^(\s*)(- )?([\w_][\w_ ]*?)(:)/gm,
+    (_match, indent, dash, key, colon) => {
+      const prefix = dash ? `${indent}${pc.cyan(dash)}` : indent
+      return `${prefix}${pc.dim(key)}${pc.dim(colon)}`
+    },
+  )
 }
 
-// ---------------------------------------------------------------------------
-// Table output
-// ---------------------------------------------------------------------------
-
-export interface TableOptions {
-  head: string[]
-  rows: (string | number)[][]
-  colWidths?: number[]
-  colAligns?: Array<'left' | 'center' | 'right'>
-}
-
-export function printTable({ head, rows, colWidths, colAligns }: TableOptions): void {
-  // NOTE: cli-table3 crashes if colWidths/colAligns are explicitly `undefined`
-  // (it treats the key as present but skips auto-compute). Only spread when defined.
-  const table = new Table({
-    head: head.map((h) => pc.bold(pc.cyan(h))),
-    ...(colWidths ? { colWidths } : {}),
-    ...(colAligns ? { colAligns } : {}),
-    style: {
-      head: [],
-      border: [],
-      compact: false,
-    },
-    chars: {
-      top: pc.gray('─'),
-      'top-mid': pc.gray('┬'),
-      'top-left': pc.gray('┌'),
-      'top-right': pc.gray('┐'),
-      bottom: pc.gray('─'),
-      'bottom-mid': pc.gray('┴'),
-      'bottom-left': pc.gray('└'),
-      'bottom-right': pc.gray('┘'),
-      left: pc.gray('│'),
-      'left-mid': pc.gray('├'),
-      mid: pc.gray('─'),
-      'mid-mid': pc.gray('┼'),
-      right: pc.gray('│'),
-      'right-mid': pc.gray('┤'),
-      middle: pc.gray('│'),
-    },
+/** Print any value as YAML to stdout. */
+export function printYaml(data: unknown): void {
+  const str = yaml.dump(data, {
+    lineWidth: Infinity,
+    noRefs: true,
+    quotingType: "'",
+    sortKeys: false,
   })
 
-  for (const row of rows) {
-    table.push(row.map(String))
-  }
+  process.stdout.write(isTTY ? colorizeYaml(str) : str)
+}
 
-  process.stdout.write(table.toString() + '\n')
+/**
+ * Print a list of items as YAML with optional pagination.
+ * Output shape:
+ *   items:
+ *     - key: value
+ *   next_page: "token"
+ */
+export function printList(
+  items: Record<string, unknown>[],
+  opts?: { nextPage?: string | null },
+): void {
+  const doc: Record<string, unknown> = { items }
+  if (opts?.nextPage) {
+    doc.next_page = opts.nextPage
+  }
+  printYaml(doc)
 }
 
 // ---------------------------------------------------------------------------
@@ -180,20 +182,9 @@ export function formatSenderFull(sender: { name?: string; email: string }): stri
 
 export function formatFlags(item: { unread?: boolean; starred?: boolean }): string {
   const parts: string[] = []
-  if (item.starred) parts.push(pc.yellow('★'))
-  if (item.unread) parts.push(pc.blue('●'))
-  // Show dim dot for read, non-starred threads so the column is never blank
-  if (parts.length === 0) parts.push(pc.dim('·'))
-  return parts.join(' ')
-}
-
-// ---------------------------------------------------------------------------
-// Text utilities
-// ---------------------------------------------------------------------------
-
-export function truncate(str: string, maxLen: number): string {
-  if (str.length <= maxLen) return str
-  return str.slice(0, maxLen - 1) + '…'
+  if (item.starred) parts.push('starred')
+  if (item.unread) parts.push('unread')
+  return parts.join(', ')
 }
 
 // ---------------------------------------------------------------------------
@@ -210,14 +201,4 @@ export function success(msg: string): void {
 
 export function error(msg: string): void {
   process.stderr.write(pc.red(msg) + '\n')
-}
-
-// ---------------------------------------------------------------------------
-// Pagination hint
-// ---------------------------------------------------------------------------
-
-export function printNextPageHint(nextPageToken: string | null): void {
-  if (nextPageToken) {
-    hint(`Next page: --page ${nextPageToken}`)
-  }
 }

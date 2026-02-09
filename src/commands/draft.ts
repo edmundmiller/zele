@@ -1,5 +1,5 @@
 // Draft commands: list, create, get, send, delete.
-// Manages Gmail drafts with table output for list views.
+// Manages Gmail drafts with YAML output for list views.
 
 import type { Goke } from 'goke'
 import { z } from 'zod'
@@ -20,12 +20,10 @@ export function registerDraftCommands(cli: Goke) {
     .option('--max <max>', z.number().default(20).describe('Max results'))
     .option('--page <page>', z.string().describe('Pagination token'))
     .option('--query <query>', z.string().describe('Search query'))
-    .option('--json', 'Output as JSON')
     .action(async (options: {
       max: number
       page?: string
       query?: string
-      json?: boolean
     }) => {
       const auth = await authenticate()
       const client = new GmailClient({ auth })
@@ -36,28 +34,22 @@ export function registerDraftCommands(cli: Goke) {
         pageToken: options.page,
       })
 
-      if (options.json) {
-        out.printJson(result)
-        return
-      }
-
       if (result.drafts.length === 0) {
         out.hint('No drafts found')
         return
       }
 
-      out.printTable({
-        head: ['Draft ID', 'To', 'Subject', 'Date'],
-        rows: result.drafts.map((d) => [
-          d.id,
-          out.truncate(d.to.join(', ') || '(no recipient)', 30),
-          out.truncate(d.subject, 40),
-          out.formatDate(d.date),
-        ]),
-      })
+      out.printList(
+        result.drafts.map((d) => ({
+          draft_id: d.id,
+          to: d.to.join(', ') || '(no recipient)',
+          subject: d.subject,
+          date: out.formatDate(d.date),
+        })),
+        { nextPage: result.nextPageToken },
+      )
 
       out.hint(`${result.drafts.length} draft(s)`)
-      out.printNextPageHint(result.nextPageToken)
     })
 
   // =========================================================================
@@ -66,17 +58,11 @@ export function registerDraftCommands(cli: Goke) {
 
   cli
     .command('draft get <draftId>', 'Show draft details')
-    .option('--json', 'Output as JSON')
-    .action(async (draftId: string, options: { json?: boolean }) => {
+    .action(async (draftId: string) => {
       const auth = await authenticate()
       const client = new GmailClient({ auth })
 
       const draft = await client.getDraft({ draftId })
-
-      if (options.json) {
-        out.printJson(draft)
-        return
-      }
 
       process.stdout.write(pc.bold(`Draft: ${draft.message.subject}`) + '\n')
       process.stdout.write(pc.dim(`Draft ID: ${draft.id}`) + '\n')
@@ -107,7 +93,6 @@ export function registerDraftCommands(cli: Goke) {
     .option('--bcc <bcc>', z.string().describe('BCC recipients (comma-separated)'))
     .option('--thread <thread>', z.string().describe('Thread ID to associate with'))
     .option('--from <from>', z.string().describe('Send-as alias email'))
-    .option('--json', 'Output as JSON')
     .action(async (options: {
       to?: string
       subject?: string
@@ -117,7 +102,6 @@ export function registerDraftCommands(cli: Goke) {
       bcc?: string
       thread?: string
       from?: string
-      json?: boolean
     }) => {
       if (!options.to) {
         out.error('--to is required')
@@ -158,12 +142,8 @@ export function registerDraftCommands(cli: Goke) {
         fromEmail: options.from,
       })
 
-      if (options.json) {
-        out.printJson(result)
-        return
-      }
-
-      out.success(`Draft created (ID: ${result.id})`)
+      out.printYaml(result)
+      out.success('Draft created')
     })
 
   // =========================================================================
@@ -172,8 +152,7 @@ export function registerDraftCommands(cli: Goke) {
 
   cli
     .command('draft send <draftId>', 'Send a draft')
-    .option('--json', 'Output as JSON')
-    .action(async (draftId: string, options: { json?: boolean }) => {
+    .action(async (draftId: string) => {
       const auth = await authenticate()
       const client = new GmailClient({ auth })
 
@@ -184,12 +163,8 @@ export function registerDraftCommands(cli: Goke) {
       cache.invalidateThreadLists()
       cache.close()
 
-      if (options.json) {
-        out.printJson(result)
-        return
-      }
-
-      out.success(`Draft sent (message ID: ${result.id})`)
+      out.printYaml(result)
+      out.success('Draft sent')
     })
 
   // =========================================================================
@@ -199,8 +174,7 @@ export function registerDraftCommands(cli: Goke) {
   cli
     .command('draft delete <draftId>', 'Delete a draft')
     .option('--force', 'Skip confirmation')
-    .option('--json', 'Output as JSON')
-    .action(async (draftId: string, options: { force?: boolean; json?: boolean }) => {
+    .action(async (draftId: string, options: { force?: boolean }) => {
       if (!options.force && process.stdin.isTTY) {
         const readline = await import('node:readline')
         const rl = readline.createInterface({ input: process.stdin, output: process.stderr })
@@ -220,11 +194,6 @@ export function registerDraftCommands(cli: Goke) {
 
       await client.deleteDraft({ draftId })
 
-      if (options.json) {
-        out.printJson({ draftId, deleted: true })
-        return
-      }
-
-      out.success(`Draft ${draftId} deleted`)
+      out.printYaml({ draft_id: draftId, deleted: true })
     })
 }

@@ -1,6 +1,6 @@
 // Mail commands: list, search, read, send, reply, forward.
 // Core email operations wrapping GmailClient with cache-first reads
-// and cli-table3 output for list views.
+// and YAML output for list views.
 
 import type { Goke } from 'goke'
 import { z } from 'zod'
@@ -37,14 +37,12 @@ export function registerMailCommands(cli: Goke) {
     .option('--max [max]', 'Max results per page (default: 20)')
     .option('--page <page>', 'Pagination token')
     .option('--label <label>', 'Filter by label name')
-    .option('--json', 'Output as JSON')
     .option('--no-cache', 'Skip cache')
     .action(async (options: {
       folder?: string
       max?: string
       page?: string
       label?: string
-      json?: boolean
       noCache?: boolean
     }) => {
       const folder = options.folder ?? 'inbox'
@@ -71,29 +69,23 @@ export function registerMailCommands(cli: Goke) {
 
       cache?.close()
 
-      if (options.json) {
-        out.printJson(result)
-        return
-      }
-
       if (result.threads.length === 0) {
         out.hint('No threads found')
         return
       }
 
-      out.printTable({
-        head: ['!', 'From', 'Subject', 'Date', 'Msgs'],
-        rows: result.threads.map((t) => [
-          out.formatFlags(t),
-          out.truncate(out.formatSender(t.from), 25),
-          out.truncate(t.subject, 45),
-          out.formatDate(t.date),
-          t.messageCount,
-        ]),
-      })
+      out.printList(
+        result.threads.map((t) => ({
+          flags: out.formatFlags(t),
+          from: out.formatSender(t.from),
+          subject: t.subject,
+          date: out.formatDate(t.date),
+          messages: t.messageCount,
+        })),
+        { nextPage: result.nextPageToken },
+      )
 
       out.hint(`${result.threads.length} threads (${folder})`)
-      out.printNextPageHint(result.nextPageToken)
     })
 
   // =========================================================================
@@ -104,11 +96,9 @@ export function registerMailCommands(cli: Goke) {
     .command('mail search <query>', 'Search email threads')
     .option('--max [max]', 'Max results (default: 20)')
     .option('--page <page>', 'Pagination token')
-    .option('--json', 'Output as JSON')
     .action(async (query: string, options: {
       max?: string
       page?: string
-      json?: boolean
     }) => {
       const max = options.max ? Number(options.max) : 20
       const auth = await authenticate()
@@ -120,29 +110,23 @@ export function registerMailCommands(cli: Goke) {
         pageToken: options.page,
       })
 
-      if (options.json) {
-        out.printJson(result)
-        return
-      }
-
       if (result.threads.length === 0) {
         out.hint(`No results for "${query}"`)
         return
       }
 
-      out.printTable({
-        head: ['!', 'From', 'Subject', 'Date', 'Msgs'],
-        rows: result.threads.map((t) => [
-          out.formatFlags(t),
-          out.truncate(out.formatSender(t.from), 25),
-          out.truncate(t.subject, 45),
-          out.formatDate(t.date),
-          t.messageCount,
-        ]),
-      })
+      out.printList(
+        result.threads.map((t) => ({
+          flags: out.formatFlags(t),
+          from: out.formatSender(t.from),
+          subject: t.subject,
+          date: out.formatDate(t.date),
+          messages: t.messageCount,
+        })),
+        { nextPage: result.nextPageToken },
+      )
 
       out.hint(`${result.threads.length} results for "${query}"`)
-      out.printNextPageHint(result.nextPageToken)
     })
 
   // =========================================================================
@@ -152,11 +136,9 @@ export function registerMailCommands(cli: Goke) {
   cli
     .command('mail read <threadId>', 'Read a full email thread')
     .option('--raw', 'Show raw message (first message only)')
-    .option('--json', 'Output as JSON')
     .option('--no-cache', 'Skip cache')
     .action(async (threadId: string, options: {
       raw?: boolean
-      json?: boolean
       noCache?: boolean
     }) => {
       const { client, cache } = await getClientAndCache(!!options.noCache)
@@ -183,11 +165,6 @@ export function registerMailCommands(cli: Goke) {
       }
 
       cache?.close()
-
-      if (options.json) {
-        out.printJson(thread)
-        return
-      }
 
       if (thread.messages.length === 0) {
         out.hint('No messages in thread')
@@ -238,7 +215,6 @@ export function registerMailCommands(cli: Goke) {
     .option('--cc <cc>', z.string().describe('CC recipients (comma-separated)'))
     .option('--bcc <bcc>', z.string().describe('BCC recipients (comma-separated)'))
     .option('--from <from>', z.string().describe('Send-as alias email'))
-    .option('--json', 'Output as JSON')
     .action(async (options: {
       to?: string
       subject?: string
@@ -247,7 +223,6 @@ export function registerMailCommands(cli: Goke) {
       cc?: string
       bcc?: string
       from?: string
-      json?: boolean
     }) => {
       if (!options.to) {
         out.error('--to is required')
@@ -298,12 +273,8 @@ export function registerMailCommands(cli: Goke) {
       cache.invalidateThreadLists()
       cache.close()
 
-      if (options.json) {
-        out.printJson(result)
-        return
-      }
-
-      out.success(`Sent to ${options.to} (ID: ${result.id})`)
+      out.printYaml(result)
+      out.success(`Sent to ${options.to}`)
     })
 
   // =========================================================================
@@ -317,14 +288,12 @@ export function registerMailCommands(cli: Goke) {
     .option('--cc <cc>', z.string().describe('Additional CC recipients'))
     .option('--all', 'Reply all (include all original recipients)')
     .option('--from <from>', z.string().describe('Send-as alias email'))
-    .option('--json', 'Output as JSON')
     .action(async (threadId: string, options: {
       body?: string
       bodyFile?: string
       cc?: string
       all?: boolean
       from?: string
-      json?: boolean
     }) => {
       const auth = await authenticate()
       const client = new GmailClient({ auth })
@@ -404,12 +373,8 @@ export function registerMailCommands(cli: Goke) {
       cache.invalidateThreadLists()
       cache.close()
 
-      if (options.json) {
-        out.printJson(result)
-        return
-      }
-
-      out.success(`Reply sent (ID: ${result.id})`)
+      out.printYaml(result)
+      out.success('Reply sent')
     })
 
   // =========================================================================
@@ -421,12 +386,10 @@ export function registerMailCommands(cli: Goke) {
     .option('--to <to>', z.string().describe('Forward recipient(s), comma-separated'))
     .option('--body <body>', z.string().describe('Optional message to prepend'))
     .option('--from <from>', z.string().describe('Send-as alias email'))
-    .option('--json', 'Output as JSON')
     .action(async (threadId: string, options: {
       to?: string
       body?: string
       from?: string
-      json?: boolean
     }) => {
       if (!options.to) {
         out.error('--to is required')
@@ -472,11 +435,7 @@ export function registerMailCommands(cli: Goke) {
       cache.invalidateThreadLists()
       cache.close()
 
-      if (options.json) {
-        out.printJson(result)
-        return
-      }
-
-      out.success(`Forwarded to ${options.to} (ID: ${result.id})`)
+      out.printYaml(result)
+      out.success(`Forwarded to ${options.to}`)
     })
 }

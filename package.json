@@ -22,12 +22,12 @@
   "packageManager": "pnpm@10.18.1",
   "dependencies": {
     "better-sqlite3": "^12.6.2",
-    "cli-table3": "^0.6.5",
     "email-addresses": "^5.0.0",
     "fkill": "^10.0.3",
     "goke": "^6.1.1",
     "google-auth-library": "^10.5.0",
     "googleapis": "^171.0.0",
+    "js-yaml": "^4.1.1",
     "mimetext": "^3.0.28",
     "picocolors": "^1.1.1",
     "turndown": "^7.2.0",
@@ -36,6 +36,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/email-addresses": "^3.0.0",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^25.2.0",
     "@types/turndown": "^5.0.5",
     "tsx": "^4.19.4",

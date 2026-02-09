@@ -16,7 +16,6 @@ async function bulkAction(
   threadIds: string[],
   actionName: string,
   fn: (client: GmailClient, ids: string[]) => Promise<void>,
-  json?: boolean,
 ) {
   if (threadIds.length === 0) {
     out.error('No thread IDs provided')
@@ -35,12 +34,7 @@ async function bulkAction(
   cache.invalidateLabelCounts()
   cache.close()
 
-  if (json) {
-    out.printJson({ action: actionName, threadIds, success: true })
-    return
-  }
-
-  out.success(`${actionName}: ${threadIds.length} thread(s)`)
+  out.printYaml({ action: actionName, thread_ids: threadIds, success: true })
 }
 
 // ---------------------------------------------------------------------------
@@ -50,62 +44,53 @@ async function bulkAction(
 export function registerMailActionCommands(cli: Goke) {
   cli
     .command('mail star [...threadIds]', 'Star threads')
-    .option('--json', 'Output as JSON')
-    .action(async (threadIds: string[], options: { json?: boolean }) => {
-      await bulkAction(threadIds, 'Starred', (c, ids) => c.star({ threadIds: ids }), options.json)
+    .action(async (threadIds: string[]) => {
+      await bulkAction(threadIds, 'Starred', (c, ids) => c.star({ threadIds: ids }))
     })
 
   cli
     .command('mail unstar [...threadIds]', 'Remove star from threads')
-    .option('--json', 'Output as JSON')
-    .action(async (threadIds: string[], options: { json?: boolean }) => {
-      await bulkAction(threadIds, 'Unstarred', (c, ids) => c.unstar({ threadIds: ids }), options.json)
+    .action(async (threadIds: string[]) => {
+      await bulkAction(threadIds, 'Unstarred', (c, ids) => c.unstar({ threadIds: ids }))
     })
 
   cli
     .command('mail archive [...threadIds]', 'Archive threads (remove from inbox)')
-    .option('--json', 'Output as JSON')
-    .action(async (threadIds: string[], options: { json?: boolean }) => {
-      await bulkAction(threadIds, 'Archived', (c, ids) => c.archive({ threadIds: ids }), options.json)
+    .action(async (threadIds: string[]) => {
+      await bulkAction(threadIds, 'Archived', (c, ids) => c.archive({ threadIds: ids }))
     })
 
   cli
     .command('mail trash <threadId>', 'Move thread to trash')
-    .option('--json', 'Output as JSON')
-    .action(async (threadId: string, options: { json?: boolean }) => {
-      await bulkAction([threadId], 'Trashed', (c, ids) => c.trash({ threadId: ids[0]! }), options.json)
+    .action(async (threadId: string) => {
+      await bulkAction([threadId], 'Trashed', (c, ids) => c.trash({ threadId: ids[0]! }))
     })
 
   cli
     .command('mail untrash <threadId>', 'Remove thread from trash')
-    .option('--json', 'Output as JSON')
-    .action(async (threadId: string, options: { json?: boolean }) => {
-      await bulkAction([threadId], 'Untrashed', (c, ids) => c.untrash({ threadId: ids[0]! }), options.json)
+    .action(async (threadId: string) => {
+      await bulkAction([threadId], 'Untrashed', (c, ids) => c.untrash({ threadId: ids[0]! }))
     })
 
   cli
     .command('mail read-mark [...threadIds]', 'Mark threads as read')
-    .option('--json', 'Output as JSON')
-    .action(async (threadIds: string[], options: { json?: boolean }) => {
-      await bulkAction(threadIds, 'Marked as read', (c, ids) => c.markAsRead({ threadIds: ids }), options.json)
+    .action(async (threadIds: string[]) => {
+      await bulkAction(threadIds, 'Marked as read', (c, ids) => c.markAsRead({ threadIds: ids }))
     })
 
   cli
     .command('mail unread-mark [...threadIds]', 'Mark threads as unread')
-    .option('--json', 'Output as JSON')
-    .action(async (threadIds: string[], options: { json?: boolean }) => {
-      await bulkAction(threadIds, 'Marked as unread', (c, ids) => c.markAsUnread({ threadIds: ids }), options.json)
+    .action(async (threadIds: string[]) => {
+      await bulkAction(threadIds, 'Marked as unread', (c, ids) => c.markAsUnread({ threadIds: ids }))
     })
 
   cli
     .command('mail label [...threadIds]', 'Add or remove labels from threads')
     .option('--add <add>', z.string().describe('Labels to add (comma-separated)'))
     .option('--remove <remove>', z.string().describe('Labels to remove (comma-separated)'))
-    .option('--json', 'Output as JSON')
     .action(async (threadIds: string[], options: {
       add?: string
       remove?: string
-      json?: boolean
     }) => {
       if (!options.add && !options.remove) {
         out.error('At least one of --add or --remove is required')
@@ -119,14 +104,12 @@ export function registerMailActionCommands(cli: Goke) {
         threadIds,
         'Labels modified',
         (c, ids) => c.modifyLabels({ threadIds: ids, addLabelIds: addLabels, removeLabelIds: removeLabels }),
-        options.json,
       )
     })
 
   cli
     .command('mail trash-spam', 'Trash all spam threads')
-    .option('--json', 'Output as JSON')
-    .action(async (options: { json?: boolean }) => {
+    .action(async () => {
       const auth = await authenticate()
       const client = new GmailClient({ auth })
 
@@ -137,11 +120,7 @@ export function registerMailActionCommands(cli: Goke) {
       cache.invalidateLabelCounts()
       cache.close()
 
-      if (options.json) {
-        out.printJson(result)
-        return
-      }
-
+      out.printYaml(result)
       out.success(`Trashed ${result.count} spam thread(s)`)
     })
 }
