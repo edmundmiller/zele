@@ -22,12 +22,14 @@ model accounts {
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
-  thread_lists  thread_lists[]
-  threads       threads[]
-  labels        labels?
-  label_counts  label_counts?
-  profiles      profiles?
-  sync_states   sync_states[]
+  thread_lists     thread_lists[]
+  threads          threads[]
+  labels           labels?
+  label_counts     label_counts?
+  profiles         profiles?
+  sync_states      sync_states[]
+  calendar_lists   calendar_lists?
+  calendar_events  calendar_events[]
 }
 
 // Caches thread list/search responses per account and query parameters.
@@ -95,6 +97,37 @@ model profiles {
   created_at DateTime @default(now())
 
   account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+}
+
+// Caches calendar list per account.
+// Used by cal list to avoid fetching calendar metadata on every invocation.
+model calendar_lists {
+  email      String   @id
+  data       String // JSON blob of CalendarListItem[]
+  ttl_ms     Int
+  created_at DateTime @default(now())
+
+  account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+}
+
+// Caches calendar event list responses per account and query parameters.
+// Used for fast cal events rendering and reduced Calendar API calls.
+model calendar_events {
+  id          Int      @id @default(autoincrement())
+  email       String
+  calendar_id String   @default("")
+  time_min    String   @default("")
+  time_max    String   @default("")
+  query       String   @default("")
+  max_results Int      @default(0)
+  page_token  String   @default("")
+  data        String // JSON blob of EventListResult
+  ttl_ms      Int
+  created_at  DateTime @default(now())
+
+  account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+
+  @@unique([email, calendar_id, time_min, time_max, query, max_results, page_token])
 }
 
 // Allowed keys for sync_states entries.

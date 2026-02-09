@@ -50,6 +50,27 @@ CREATE TABLE IF NOT EXISTS "profiles" (
     "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "profiles_email_fkey" FOREIGN KEY ("email") REFERENCES "accounts" ("email") ON DELETE CASCADE ON UPDATE CASCADE
 );
+CREATE TABLE IF NOT EXISTS "calendar_lists" (
+    "email" TEXT NOT NULL PRIMARY KEY,
+    "data" TEXT NOT NULL,
+    "ttl_ms" INTEGER NOT NULL,
+    "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "calendar_lists_email_fkey" FOREIGN KEY ("email") REFERENCES "accounts" ("email") ON DELETE CASCADE ON UPDATE CASCADE
+);
+CREATE TABLE IF NOT EXISTS "calendar_events" (
+    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    "email" TEXT NOT NULL,
+    "calendar_id" TEXT NOT NULL DEFAULT '',
+    "time_min" TEXT NOT NULL DEFAULT '',
+    "time_max" TEXT NOT NULL DEFAULT '',
+    "query" TEXT NOT NULL DEFAULT '',
+    "max_results" INTEGER NOT NULL DEFAULT 0,
+    "page_token" TEXT NOT NULL DEFAULT '',
+    "data" TEXT NOT NULL,
+    "ttl_ms" INTEGER NOT NULL,
+    "created_at" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "calendar_events_email_fkey" FOREIGN KEY ("email") REFERENCES "accounts" ("email") ON DELETE CASCADE ON UPDATE CASCADE
+);
 CREATE TABLE IF NOT EXISTS "sync_states" (
     "email" TEXT NOT NULL,
     "key" TEXT NOT NULL,
@@ -60,3 +81,4 @@ CREATE TABLE IF NOT EXISTS "sync_states" (
 );
 CREATE UNIQUE INDEX "thread_lists_email_folder_query_label_ids_page_token_max_results_key" ON "thread_lists"("email", "folder", "query", "label_ids", "page_token", "max_results");
 CREATE UNIQUE INDEX "threads_email_thread_id_key" ON "threads"("email", "thread_id");
+CREATE UNIQUE INDEX "calendar_events_email_calendar_id_time_min_time_max_query_max_results_page_token_key" ON "calendar_events"("email", "calendar_id", "time_min", "time_max", "query", "max_results", "page_token");

@@ -12,6 +12,8 @@ export const TTL = {
   LABELS: 30 * 60 * 1000, // 30 minutes
   PROFILE: 24 * 60 * 60 * 1000, // 24 hours
   LABEL_COUNTS: 2 * 60 * 1000, // 2 minutes
+  CALENDAR_LIST: 30 * 60 * 1000, // 30 minutes
+  CALENDAR_EVENTS: 5 * 60 * 1000, // 5 minutes
 } as const
 
 function isExpired(createdAt: Date, ttlMs: number): boolean {
@@ -203,6 +205,90 @@ export async function setLastHistoryId(email: string, historyId: string): Promis
 }
 
 // ---------------------------------------------------------------------------
+// Calendar list cache
+// ---------------------------------------------------------------------------
+
+export async function cacheCalendarList(email: string, data: unknown): Promise<void> {
+  const prisma = await getPrisma()
+  await prisma.calendar_lists.upsert({
+    where: { email },
+    create: { email, data: JSON.stringify(data), ttl_ms: TTL.CALENDAR_LIST },
+    update: { data: JSON.stringify(data), ttl_ms: TTL.CALENDAR_LIST, created_at: new Date() },
+  })
+}
+
+export async function getCachedCalendarList<T = unknown>(email: string): Promise<T | undefined> {
+  const prisma = await getPrisma()
+  const row = await prisma.calendar_lists.findUnique({ where: { email } })
+  if (!row || isExpired(row.created_at, row.ttl_ms)) return undefined
+  return JSON.parse(row.data) as T
+}
+
+export async function invalidateCalendarLists(email: string): Promise<void> {
+  const prisma = await getPrisma()
+  await prisma.calendar_lists.deleteMany({ where: { email } })
+}
+
+// ---------------------------------------------------------------------------
+// Calendar events cache
+// ---------------------------------------------------------------------------
+
+export async function cacheCalendarEvents(
+  email: string,
+  params: { calendarId?: string; timeMin?: string; timeMax?: string; query?: string; maxResults?: number; pageToken?: string },
+  data: unknown,
+): Promise<void> {
+  const prisma = await getPrisma()
+  const where = {
+    email,
+    calendar_id: params.calendarId ?? '',
+    time_min: params.timeMin ?? '',
+    time_max: params.timeMax ?? '',
+    query: params.query ?? '',
+    max_results: params.maxResults ?? 0,
+    page_token: params.pageToken ?? '',
+  }
+
+  await prisma.calendar_events.upsert({
+    where: { email_calendar_id_time_min_time_max_query_max_results_page_token: where },
+    create: { ...where, data: JSON.stringify(data), ttl_ms: TTL.CALENDAR_EVENTS },
+    update: { data: JSON.stringify(data), ttl_ms: TTL.CALENDAR_EVENTS, created_at: new Date() },
+  })
+}
+
+export async function getCachedCalendarEvents<T = unknown>(
+  email: string,
+  params: { calendarId?: string; timeMin?: string; timeMax?: string; query?: string; maxResults?: number; pageToken?: string },
+): Promise<T | undefined> {
+  const prisma = await getPrisma()
+  const row = await prisma.calendar_events.findUnique({
+    where: {
+      email_calendar_id_time_min_time_max_query_max_results_page_token: {
+        email,
+        calendar_id: params.calendarId ?? '',
+        time_min: params.timeMin ?? '',
+        time_max: params.timeMax ?? '',
+        query: params.query ?? '',
+        max_results: params.maxResults ?? 0,
+        page_token: params.pageToken ?? '',
+      },
+    },
+  })
+
+  if (!row || isExpired(row.created_at, row.ttl_ms)) return undefined
+  return JSON.parse(row.data) as T
+}
+
+export async function invalidateCalendarEvents(email: string, calendarId?: string): Promise<void> {
+  const prisma = await getPrisma()
+  if (calendarId) {
+    await prisma.calendar_events.deleteMany({ where: { email, calendar_id: calendarId } })
+  } else {
+    await prisma.calendar_events.deleteMany({ where: { email } })
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Housekeeping
 // ---------------------------------------------------------------------------
 
@@ -230,6 +316,14 @@ export async function clearExpired(): Promise<void> {
     `DELETE FROM profiles WHERE (strftime('%s', created_at) * 1000 + ttl_ms) < ?`,
     now,
   )
+  await prisma.$executeRawUnsafe(
+    `DELETE FROM calendar_lists WHERE (strftime('%s', created_at) * 1000 + ttl_ms) < ?`,
+    now,
+  )
+  await prisma.$executeRawUnsafe(
+    `DELETE FROM calendar_events WHERE (strftime('%s', created_at) * 1000 + ttl_ms) < ?`,
+    now,
+  )
 }
 
 export async function clearAll(email: string): Promise<void> {
@@ -240,4 +334,6 @@ export async function clearAll(email: string): Promise<void> {
   await prisma.label_counts.deleteMany({ where: { email } })
   await prisma.profiles.deleteMany({ where: { email } })
   await prisma.sync_states.deleteMany({ where: { email } })
+  await prisma.calendar_lists.deleteMany({ where: { email } })
+  await prisma.calendar_events.deleteMany({ where: { email } })
 }
