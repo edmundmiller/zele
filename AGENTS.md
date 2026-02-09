@@ -8,7 +8,7 @@ do not add manual type annotations to `.action(async ...)` parameters in goke co
 
 ## database
 
-gtui uses a single SQLite database at `~/.gtui/gtui.db` as the source of truth for CLI state.
+zele uses a single SQLite database at `~/.zele/zele.db` as the source of truth for CLI state.
 
 all persistent state is stored in this DB via Prisma models:
 - `accounts`: OAuth tokens per email account

@@ -1,5 +1,5 @@
 // Auth commands: login, logout, status.
-// Manages OAuth2 authentication for gtui.
+// Manages OAuth2 authentication for zele.
 // Supports multiple accounts: login adds accounts, logout removes one.
 
 import type { Goke } from 'goke'
@@ -72,7 +72,7 @@ export function registerAuthCommands(cli: Goke) {
       const statuses = await getAuthStatuses()
 
       if (statuses.length === 0) {
-        out.hint('Not authenticated. Run: gtui auth login')
+        out.hint('Not authenticated. Run: zele auth login')
         return
       }
 

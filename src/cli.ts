@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// gtui — Gmail CLI built on goke.
+// zele — Gmail CLI built on goke.
 // Entry point: registers all commands, global options, help, and version.
 // Uses goke for command parsing with zod schemas for type-safe options.
 
@@ -14,7 +14,7 @@ import { registerLabelCommands } from './commands/label.js'
 import { registerAttachmentCommands } from './commands/attachment.js'
 import { registerProfileCommands } from './commands/profile.js'
 
-const cli = goke('gtui')
+const cli = goke('zele')
 
 // ---------------------------------------------------------------------------
 // Global options

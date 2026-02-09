@@ -1,9 +1,9 @@
-// OAuth2 authentication module for gtui.
+// OAuth2 authentication module for zele.
 // Multi-account support: tokens are stored in the Prisma-managed SQLite DB
 // (accounts table) keyed by email. Supports login (browser OAuth), per-account
 // token refresh, and helpers to get authenticated GmailClient instances for
 // one or all accounts.
-// Migration: on first use, if legacy ~/.gtui/tokens.json exists, it is
+// Migration: on first use, if legacy ~/.zele/tokens.json exists, it is
 // imported into the DB and renamed to tokens.json.bak.
 
 import http from 'node:http'
@@ -13,6 +13,7 @@ import path from 'node:path'
 import os from 'node:os'
 import { OAuth2Client, type Credentials } from 'google-auth-library'
 import fkill from 'fkill'
+import pc from 'picocolors'
 import { getPrisma } from './db.js'
 import { GmailClient } from './gmail-client.js'
 
@@ -20,15 +21,15 @@ import { GmailClient } from './gmail-client.js'
 // Config
 // ---------------------------------------------------------------------------
 
-const GTUI_DIR = path.join(os.homedir(), '.gtui')
-const LEGACY_TOKENS_FILE = path.join(GTUI_DIR, 'tokens.json')
+const ZELE_DIR = path.join(os.homedir(), '.zele')
+const LEGACY_TOKENS_FILE = path.join(ZELE_DIR, 'tokens.json')
 
 const CLIENT_ID =
-  process.env.GTUI_CLIENT_ID ??
+  process.env.ZELE_CLIENT_ID ??
   '406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com'
 
 const CLIENT_SECRET =
-  process.env.GTUI_CLIENT_SECRET ?? 'kSmqreRr0qwBWJgbf5Y-PjSU'
+  process.env.ZELE_CLIENT_SECRET ?? 'kSmqreRr0qwBWJgbf5Y-PjSU'
 
 const REDIRECT_PORT = 8089
 const SCOPES = [
@@ -92,9 +93,9 @@ async function migrateLegacyTokens(): Promise<void> {
 
     // Rename old file so we don't migrate again
     fs.renameSync(LEGACY_TOKENS_FILE, LEGACY_TOKENS_FILE + '.bak')
-    process.stderr.write(`Migrated legacy tokens for ${email}\n`)
+    process.stderr.write(pc.green(`Migrated legacy tokens for ${email}`) + '\n')
   } catch (err) {
-    process.stderr.write(`Warning: legacy token migration failed: ${err}\n`)
+    process.stderr.write(pc.yellow(`Warning: legacy token migration failed: ${err}`) + '\n')
   }
 }
 
@@ -130,11 +131,11 @@ async function getAuthCodeFromBrowser(oauth2Client: OAuth2Client): Promise<strin
 
   await fkill(`:${REDIRECT_PORT}`, { force: true, silent: true }).catch(() => {})
 
-  process.stderr.write('\n1. Open this URL to authorize:\n\n')
-  process.stderr.write('   ' + authUrl + '\n\n')
-  process.stderr.write('2. If running locally, the browser will redirect automatically.\n')
-  process.stderr.write('   If running remotely, the redirect page won\'t load — that\'s fine.\n')
-  process.stderr.write('   Just copy the URL from your browser\'s address bar and paste it below.\n\n')
+  process.stderr.write('\n' + pc.bold('1.') + ' Open this URL to authorize:\n\n')
+  process.stderr.write('   ' + pc.cyan(pc.underline(authUrl)) + '\n\n')
+  process.stderr.write(pc.bold('2.') + ' If running locally, the browser will redirect automatically.\n')
+  process.stderr.write(pc.dim('   If running remotely, the redirect page won\'t load — that\'s fine.') + '\n')
+  process.stderr.write(pc.dim('   Just copy the URL from your browser\'s address bar and paste it below.') + '\n\n')
 
   return new Promise((resolve, reject) => {
     let resolved = false
@@ -187,13 +188,13 @@ async function getAuthCodeFromBrowser(oauth2Client: OAuth2Client): Promise<strin
 
     if (process.stdin.isTTY) {
       rl = readline.createInterface({ input: process.stdin, output: process.stderr })
-      rl.question('Paste redirect URL here (or wait for auto-redirect): ', (answer) => {
+      rl.question(pc.dim('Paste redirect URL here (or wait for auto-redirect): '), (answer) => {
         const code = extractCodeFromInput(answer)
         if (code) {
           finish(code)
         } else {
-          process.stderr.write('Could not extract authorization code from input.\n')
-          process.stderr.write('Waiting for browser redirect...\n')
+          process.stderr.write(pc.yellow('Could not extract authorization code from input.') + '\n')
+          process.stderr.write(pc.dim('Waiting for browser redirect...') + '\n')
         }
       })
     }
@@ -212,7 +213,7 @@ export async function login(): Promise<{ email: string; client: GmailClient }> {
   const oauth2Client = createOAuth2Client()
 
   const code = await getAuthCodeFromBrowser(oauth2Client)
-  process.stderr.write('Got authorization code, exchanging for tokens...\n')
+  process.stderr.write(pc.dim('Got authorization code, exchanging for tokens...') + '\n')
 
   const { tokens } = await oauth2Client.getToken(code)
   oauth2Client.setCredentials(tokens)
@@ -265,7 +266,7 @@ async function authenticateAccount(email: string): Promise<OAuth2Client> {
   const prisma = await getPrisma()
   const row = await prisma.accounts.findUnique({ where: { email } })
   if (!row) {
-    throw new Error(`No account found for ${email}. Run: gtui auth login`)
+    throw new Error(`No account found for ${email}. Run: zele auth login`)
   }
 
   const tokens: Credentials = JSON.parse(row.tokens)
@@ -275,7 +276,7 @@ async function authenticateAccount(email: string): Promise<OAuth2Client> {
   // Refresh if expired — merge to preserve refresh_token which Google
   // often omits from refresh responses
   if (tokens.expiry_date && tokens.expiry_date < Date.now()) {
-    process.stderr.write(`Token expired for ${email}, refreshing...\n`)
+    process.stderr.write(pc.dim(`Token expired for ${email}, refreshing...`) + '\n')
     const { credentials } = await oauth2Client.refreshAccessToken()
     const merged = { ...tokens, ...credentials }
     oauth2Client.setCredentials(merged)
@@ -299,7 +300,7 @@ export async function getClients(
 
   const allEmails = await listAccounts()
   if (allEmails.length === 0) {
-    throw new Error('No accounts registered. Run: gtui auth login')
+    throw new Error('No accounts registered. Run: zele auth login')
   }
 
   const emails = accounts && accounts.length > 0

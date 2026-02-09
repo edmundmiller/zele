@@ -1,4 +1,4 @@
-// Output formatting utilities for gtui CLI.
+// Output formatting utilities for zele CLI.
 // Handles YAML output with TTY-aware coloring, date formatting,
 // HTML-to-markdown email conversion (turndown), and stderr hints.
 // Follows gogcli pattern: data to stdout, hints/progress to stderr.

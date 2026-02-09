@@ -1,5 +1,5 @@
-// Prisma singleton for gtui.
-// Manages a single SQLite database at ~/.gtui/gtui.db for all state:
+// Prisma singleton for zele.
+// Manages a single SQLite database at ~/.zele/zele.db for all state:
 // accounts (OAuth tokens), cache (threads, labels, profiles), and sync state.
 // Runs idempotent schema migration on every startup using src/schema.sql.
 
@@ -15,8 +15,8 @@ export { PrismaClient }
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
-const GTUI_DIR = path.join(os.homedir(), '.gtui')
-const DB_PATH = path.join(GTUI_DIR, 'gtui.db')
+const ZELE_DIR = path.join(os.homedir(), '.zele')
+const DB_PATH = path.join(ZELE_DIR, 'zele.db')
 
 let prismaInstance: PrismaClient | null = null
 let initPromise: Promise<PrismaClient> | null = null
@@ -37,8 +37,8 @@ export function getPrisma(): Promise<PrismaClient> {
 }
 
 async function initializePrisma(): Promise<PrismaClient> {
-  if (!fs.existsSync(GTUI_DIR)) {
-    fs.mkdirSync(GTUI_DIR, { recursive: true })
+  if (!fs.existsSync(ZELE_DIR)) {
+    fs.mkdirSync(ZELE_DIR, { recursive: true })
   }
 
   const adapter = new PrismaLibSql({ url: `file:${DB_PATH}` })
