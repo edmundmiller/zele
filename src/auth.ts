@@ -29,9 +29,9 @@ const REDIRECT_PORT = 8089
 const SCOPES = [
   'https://mail.google.com/',                       // Gmail (full)
   'https://www.googleapis.com/auth/calendar',       // Calendar (full)
-  'https://www.googleapis.com/auth/drive',          // Drive (full)
-  'https://www.googleapis.com/auth/contacts',       // Contacts
-  'https://www.googleapis.com/auth/tasks',          // Tasks
+  // 'https://www.googleapis.com/auth/drive',          // Drive (full) blocks the app
+  // 'https://www.googleapis.com/auth/contacts',       // Contacts blocks the app
+  // 'https://www.googleapis.com/auth/tasks',          // Tasks blocks the app
   'https://www.googleapis.com/auth/userinfo.email', // Email identity
 ]
 
