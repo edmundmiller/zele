@@ -1,12 +1,13 @@
 // Draft commands: list, create, get, send, delete.
 // Manages Gmail drafts with YAML output for list views.
+// Multi-account: list fetches all accounts concurrently and merges by date.
 
 import type { Goke } from 'goke'
 import { z } from 'zod'
 import fs from 'node:fs'
-import { authenticate } from '../auth.js'
+import { getClients, getClient } from '../auth.js'
 import { GmailClient } from '../gmail-client.js'
-import { GmailCache } from '../gmail-cache.js'
+import * as cache from '../gmail-cache.js'
 import * as out from '../output.js'
 import pc from 'picocolors'
 
@@ -20,36 +21,61 @@ export function registerDraftCommands(cli: Goke) {
     .option('--max <max>', z.number().default(20).describe('Max results'))
     .option('--page <page>', z.string().describe('Pagination token'))
     .option('--query <query>', z.string().describe('Search query'))
-    .action(async (options: {
-      max: number
-      page?: string
-      query?: string
-    }) => {
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
+    .action(async (options) => {
+      const clients = await getClients(options.account)
 
-      const result = await client.listDrafts({
-        query: options.query,
-        maxResults: options.max,
-        pageToken: options.page,
-      })
+      if (options.page && clients.length > 1) {
+        out.error('--page cannot be used with multiple accounts (page tokens are per-account)')
+        process.exit(1)
+      }
 
-      if (result.drafts.length === 0) {
+      // Fetch from all accounts concurrently, tolerating individual failures
+      const settled = await Promise.allSettled(
+        clients.map(async ({ email, client }) => {
+          const result = await client.listDrafts({
+            query: options.query,
+            maxResults: options.max,
+            pageToken: options.page,
+          })
+          return { email, result }
+        }),
+      )
+
+      const allResults = settled
+        .filter((r): r is PromiseFulfilledResult<{ email: string; result: Awaited<ReturnType<GmailClient['listDrafts']>> & { email: string } }> => {
+          if (r.status === 'rejected') {
+            out.error(`Failed to fetch drafts: ${r.reason}`)
+            return false
+          }
+          return true
+        })
+        .map((r) => r.value)
+
+      // Merge drafts from all accounts, sorted by date descending, capped at max
+      const merged = allResults
+        .flatMap(({ email, result }) =>
+          result.drafts.map((d) => ({ ...d, account: email })),
+        )
+        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+        .slice(0, options.max)
+
+      if (merged.length === 0) {
         out.hint('No drafts found')
         return
       }
 
+      const showAccount = clients.length > 1
       out.printList(
-        result.drafts.map((d) => ({
+        merged.map((d) => ({
+          ...(showAccount ? { account: d.account } : {}),
           draft_id: d.id,
           to: d.to.join(', ') || '(no recipient)',
           subject: d.subject,
           date: out.formatDate(d.date),
         })),
-        { nextPage: result.nextPageToken },
       )
 
-      out.hint(`${result.drafts.length} draft(s)`)
+      out.hint(`${merged.length} draft(s)`)
     })
 
   // =========================================================================
@@ -58,9 +84,8 @@ export function registerDraftCommands(cli: Goke) {
 
   cli
     .command('draft get <draftId>', 'Show draft details')
-    .action(async (draftId: string) => {
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
+    .action(async (draftId, options) => {
+      const { client } = await getClient(options.account)
 
       const draft = await client.getDraft({ draftId })
 
@@ -93,16 +118,7 @@ export function registerDraftCommands(cli: Goke) {
     .option('--bcc <bcc>', z.string().describe('BCC recipients (comma-separated)'))
     .option('--thread <thread>', z.string().describe('Thread ID to associate with'))
     .option('--from <from>', z.string().describe('Send-as alias email'))
-    .action(async (options: {
-      to?: string
-      subject?: string
-      body?: string
-      bodyFile?: string
-      cc?: string
-      bcc?: string
-      thread?: string
-      from?: string
-    }) => {
+    .action(async (options) => {
       if (!options.to) {
         out.error('--to is required')
         process.exit(1)
@@ -112,7 +128,6 @@ export function registerDraftCommands(cli: Goke) {
         process.exit(1)
       }
 
-      // Resolve body
       let body = options.body ?? ''
       if (options.bodyFile) {
         if (options.bodyFile === '-') {
@@ -129,8 +144,7 @@ export function registerDraftCommands(cli: Goke) {
       const parseEmails = (str: string) =>
         str.split(',').map((e) => e.trim()).filter(Boolean).map((email) => ({ email }))
 
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
+      const { client } = await getClient(options.account)
 
       const result = await client.createDraft({
         to: parseEmails(options.to),
@@ -152,16 +166,12 @@ export function registerDraftCommands(cli: Goke) {
 
   cli
     .command('draft send <draftId>', 'Send a draft')
-    .action(async (draftId: string) => {
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
+    .action(async (draftId, options) => {
+      const { email, client } = await getClient(options.account)
 
       const result = await client.sendDraft({ draftId })
 
-      // Invalidate cache
-      const cache = new GmailCache()
-      cache.invalidateThreadLists()
-      cache.close()
+      await cache.invalidateThreadLists(email)
 
       out.printYaml(result)
       out.success('Draft sent')
@@ -174,7 +184,7 @@ export function registerDraftCommands(cli: Goke) {
   cli
     .command('draft delete <draftId>', 'Delete a draft')
     .option('--force', 'Skip confirmation')
-    .action(async (draftId: string, options: { force?: boolean }) => {
+    .action(async (draftId, options) => {
       if (!options.force && process.stdin.isTTY) {
         const readline = await import('node:readline')
         const rl = readline.createInterface({ input: process.stdin, output: process.stderr })
@@ -189,8 +199,7 @@ export function registerDraftCommands(cli: Goke) {
         }
       }
 
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
+      const { client } = await getClient(options.account)
 
       await client.deleteDraft({ draftId })
 

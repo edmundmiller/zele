@@ -5,6 +5,7 @@
 // Uses goke for command parsing with zod schemas for type-safe options.
 
 import { goke } from 'goke'
+import { z } from 'zod'
 import { registerAuthCommands } from './commands/auth-cmd.js'
 import { registerMailCommands } from './commands/mail.js'
 import { registerMailActionCommands } from './commands/mail-actions.js'
@@ -14,6 +15,15 @@ import { registerAttachmentCommands } from './commands/attachment.js'
 import { registerProfileCommands } from './commands/profile.js'
 
 const cli = goke('gtui')
+
+// ---------------------------------------------------------------------------
+// Global options
+// ---------------------------------------------------------------------------
+
+cli.option(
+  '--account <account>',
+  z.array(z.string()).describe('Filter by email account (repeatable)'),
+)
 
 // ---------------------------------------------------------------------------
 // Register all command modules

@@ -6,7 +6,7 @@ import type { Goke } from 'goke'
 import { z } from 'zod'
 import fs from 'node:fs'
 import path from 'node:path'
-import { authenticate } from '../auth.js'
+import { getClient } from '../auth.js'
 import { GmailClient } from '../gmail-client.js'
 import * as out from '../output.js'
 
@@ -17,9 +17,8 @@ export function registerAttachmentCommands(cli: Goke) {
 
   cli
     .command('attachment list <messageId>', 'List attachments for a message')
-    .action(async (messageId: string) => {
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
+    .action(async (messageId, options) => {
+      const { client } = await getClient(options.account)
 
       const msg = await client.getMessage({ messageId })
       if ('raw' in msg) {
@@ -54,12 +53,8 @@ export function registerAttachmentCommands(cli: Goke) {
     .command('attachment get <messageId> <attachmentId>', 'Download an attachment')
     .option('--out-dir <outDir>', z.string().default('.').describe('Output directory'))
     .option('--filename <filename>', z.string().describe('Override filename'))
-    .action(async (messageId: string, attachmentId: string, options: {
-      outDir: string
-      filename?: string
-    }) => {
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
+    .action(async (messageId, attachmentId, options) => {
+      const { client } = await getClient(options.account)
 
       // Get attachment metadata first
       const msg = await client.getMessage({ messageId })

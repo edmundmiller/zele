@@ -1,26 +1,16 @@
 // Mail commands: list, search, read, send, reply, forward.
 // Core email operations wrapping GmailClient with cache-first reads
 // and YAML output for list views.
+// Multi-account: list/search fetch all accounts concurrently and merge by date.
 
 import type { Goke } from 'goke'
 import { z } from 'zod'
 import fs from 'node:fs'
-import { authenticate } from '../auth.js'
+import { getClients, getClient } from '../auth.js'
 import { GmailClient, type ThreadData, type ThreadListResult } from '../gmail-client.js'
-import { GmailCache } from '../gmail-cache.js'
+import * as cache from '../gmail-cache.js'
 import * as out from '../output.js'
 import pc from 'picocolors'
-
-// ---------------------------------------------------------------------------
-// Shared: get authenticated client + cache
-// ---------------------------------------------------------------------------
-
-async function getClientAndCache(noCache: boolean) {
-  const auth = await authenticate()
-  const client = new GmailClient({ auth })
-  const cache = noCache ? null : new GmailCache()
-  return { client, cache }
-}
 
 // ---------------------------------------------------------------------------
 // Register commands
@@ -38,54 +28,84 @@ export function registerMailCommands(cli: Goke) {
     .option('--page <page>', 'Pagination token')
     .option('--label <label>', 'Filter by label name')
     .option('--no-cache', 'Skip cache')
-    .action(async (options: {
-      folder?: string
-      max?: string
-      page?: string
-      label?: string
-      noCache?: boolean
-    }) => {
+    .action(async (options) => {
       const folder = options.folder ?? 'inbox'
       const max = options.max ? Number(options.max) : 20
-      const { client, cache } = await getClientAndCache(!!options.noCache)
+      const clients = await getClients(options.account)
+
+      if (options.page && clients.length > 1) {
+        out.error('--page cannot be used with multiple accounts (page tokens are per-account)')
+        process.exit(1)
+      }
 
       const cacheParams = {
         folder,
+        maxResults: max,
         labelIds: options.label ? [options.label] : undefined,
         pageToken: options.page,
       }
 
-      // Cache-first read
-      let result = cache?.getCachedThreadList<ThreadListResult>(cacheParams)
-      if (!result) {
-        result = await client.listThreads({
-          folder,
-          maxResults: max,
-          labelIds: options.label ? [options.label] : undefined,
-          pageToken: options.page,
+      // Fetch from all accounts concurrently, tolerating individual failures
+      const settled = await Promise.allSettled(
+        clients.map(async ({ email, client }) => {
+          if (!options.noCache) {
+            const cached = await cache.getCachedThreadList<ThreadListResult>(email, cacheParams)
+            if (cached) {
+              return { email, result: cached }
+            }
+          }
+
+          const result = await client.listThreads({
+            folder,
+            maxResults: max,
+            labelIds: options.label ? [options.label] : undefined,
+            pageToken: options.page,
+          })
+
+          if (!options.noCache) {
+            await cache.cacheThreadList(email, cacheParams, result)
+          }
+
+          return { email, result }
+        }),
+      )
+
+      const allResults = settled
+        .filter((r): r is PromiseFulfilledResult<{ email: string; result: ThreadListResult }> => {
+          if (r.status === 'rejected') {
+            out.error(`Failed to fetch: ${r.reason}`)
+            return false
+          }
+          return true
         })
-        cache?.cacheThreadList(cacheParams, result)
-      }
+        .map((r) => r.value)
 
-      cache?.close()
+      // Merge threads from all accounts, sorted by date descending, capped at max
+      const merged = allResults
+        .flatMap(({ email, result }) =>
+          result.threads.map((t) => ({ ...t, account: email })),
+        )
+        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+        .slice(0, max)
 
-      if (result.threads.length === 0) {
+      if (merged.length === 0) {
         out.hint('No threads found')
         return
       }
 
+      const showAccount = clients.length > 1
       out.printList(
-        result.threads.map((t) => ({
+        merged.map((t) => ({
+          ...(showAccount ? { account: t.account } : {}),
           flags: out.formatFlags(t),
           from: out.formatSender(t.from),
           subject: t.subject,
           date: out.formatDate(t.date),
           messages: t.messageCount,
         })),
-        { nextPage: result.nextPageToken },
       )
 
-      out.hint(`${result.threads.length} threads (${folder})`)
+      out.hint(`${merged.length} threads (${folder})`)
     })
 
   // =========================================================================
@@ -96,37 +116,62 @@ export function registerMailCommands(cli: Goke) {
     .command('mail search <query>', 'Search email threads')
     .option('--max [max]', 'Max results (default: 20)')
     .option('--page <page>', 'Pagination token')
-    .action(async (query: string, options: {
-      max?: string
-      page?: string
-    }) => {
+    .action(async (query, options) => {
       const max = options.max ? Number(options.max) : 20
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
+      const clients = await getClients(options.account)
 
-      const result = await client.listThreads({
-        query,
-        maxResults: max,
-        pageToken: options.page,
-      })
+      if (options.page && clients.length > 1) {
+        out.error('--page cannot be used with multiple accounts (page tokens are per-account)')
+        process.exit(1)
+      }
 
-      if (result.threads.length === 0) {
+      // Search all accounts concurrently, tolerating individual failures
+      const settled = await Promise.allSettled(
+        clients.map(async ({ email, client }) => {
+          const result = await client.listThreads({
+            query,
+            maxResults: max,
+            pageToken: options.page,
+          })
+          return { email, result }
+        }),
+      )
+
+      const allResults = settled
+        .filter((r): r is PromiseFulfilledResult<{ email: string; result: ThreadListResult }> => {
+          if (r.status === 'rejected') {
+            out.error(`Failed to search: ${r.reason}`)
+            return false
+          }
+          return true
+        })
+        .map((r) => r.value)
+
+      const merged = allResults
+        .flatMap(({ email, result }) =>
+          result.threads.map((t) => ({ ...t, account: email })),
+        )
+        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+        .slice(0, max)
+
+      if (merged.length === 0) {
         out.hint(`No results for "${query}"`)
         return
       }
 
+      const showAccount = clients.length > 1
       out.printList(
-        result.threads.map((t) => ({
+        merged.map((t) => ({
+          ...(showAccount ? { account: t.account } : {}),
           flags: out.formatFlags(t),
           from: out.formatSender(t.from),
           subject: t.subject,
           date: out.formatDate(t.date),
           messages: t.messageCount,
         })),
-        { nextPage: result.nextPageToken },
       )
 
-      out.hint(`${result.threads.length} results for "${query}"`)
+      out.hint(`${merged.length} results for "${query}"`)
     })
 
   // =========================================================================
@@ -137,34 +182,31 @@ export function registerMailCommands(cli: Goke) {
     .command('mail read <threadId>', 'Read a full email thread')
     .option('--raw', 'Show raw message (first message only)')
     .option('--no-cache', 'Skip cache')
-    .action(async (threadId: string, options: {
-      raw?: boolean
-      noCache?: boolean
-    }) => {
-      const { client, cache } = await getClientAndCache(!!options.noCache)
+    .action(async (threadId, options) => {
+      const { email, client } = await getClient(options.account)
 
       if (options.raw) {
-        // Get first message raw
         const thread = await client.getThread({ threadId })
         if (thread.messages.length === 0) {
           out.hint('No messages in thread')
-          cache?.close()
           return
         }
         const rawMsg = await client.getRawMessage({ messageId: thread.messages[0]!.id })
         process.stdout.write(rawMsg + '\n')
-        cache?.close()
         return
       }
 
       // Cache-first read
-      let thread = cache?.getCachedThread<ThreadData>(threadId)
+      let thread: ThreadData | undefined
+      if (!options.noCache) {
+        thread = await cache.getCachedThread<ThreadData>(email, threadId)
+      }
       if (!thread) {
         thread = await client.getThread({ threadId })
-        cache?.cacheThread(threadId, thread)
+        if (!options.noCache) {
+          await cache.cacheThread(email, threadId, thread)
+        }
       }
-
-      cache?.close()
 
       if (thread.messages.length === 0) {
         out.hint('No messages in thread')
@@ -195,7 +237,6 @@ export function registerMailCommands(cli: Goke) {
 
         process.stdout.write('\n')
 
-        // Render body as markdown if HTML
         const body = out.renderEmailBody(msg.body, msg.mimeType)
         process.stdout.write(body + '\n')
         process.stdout.write('\n' + pc.dim('─'.repeat(60)) + '\n\n')
@@ -215,15 +256,7 @@ export function registerMailCommands(cli: Goke) {
     .option('--cc <cc>', z.string().describe('CC recipients (comma-separated)'))
     .option('--bcc <bcc>', z.string().describe('BCC recipients (comma-separated)'))
     .option('--from <from>', z.string().describe('Send-as alias email'))
-    .action(async (options: {
-      to?: string
-      subject?: string
-      body?: string
-      bodyFile?: string
-      cc?: string
-      bcc?: string
-      from?: string
-    }) => {
+    .action(async (options) => {
       if (!options.to) {
         out.error('--to is required')
         process.exit(1)
@@ -233,11 +266,9 @@ export function registerMailCommands(cli: Goke) {
         process.exit(1)
       }
 
-      // Resolve body
       let body = options.body ?? ''
       if (options.bodyFile) {
         if (options.bodyFile === '-') {
-          // Read from stdin
           const chunks: Buffer[] = []
           for await (const chunk of process.stdin) {
             chunks.push(chunk)
@@ -256,8 +287,7 @@ export function registerMailCommands(cli: Goke) {
       const parseEmails = (str: string) =>
         str.split(',').map((e) => e.trim()).filter(Boolean).map((email) => ({ email }))
 
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
+      const { email, client } = await getClient(options.account)
 
       const result = await client.sendMessage({
         to: parseEmails(options.to),
@@ -268,10 +298,7 @@ export function registerMailCommands(cli: Goke) {
         fromEmail: options.from,
       })
 
-      // Invalidate cache
-      const cache = new GmailCache()
-      cache.invalidateThreadLists()
-      cache.close()
+      await cache.invalidateThreadLists(email)
 
       out.printYaml(result)
       out.success(`Sent to ${options.to}`)
@@ -288,17 +315,9 @@ export function registerMailCommands(cli: Goke) {
     .option('--cc <cc>', z.string().describe('Additional CC recipients'))
     .option('--all', 'Reply all (include all original recipients)')
     .option('--from <from>', z.string().describe('Send-as alias email'))
-    .action(async (threadId: string, options: {
-      body?: string
-      bodyFile?: string
-      cc?: string
-      all?: boolean
-      from?: string
-    }) => {
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
+    .action(async (threadId, options) => {
+      const { email, client } = await getClient(options.account)
 
-      // Fetch thread to get reply context
       const thread = await client.getThread({ threadId })
       if (thread.messages.length === 0) {
         out.error('No messages in thread')
@@ -307,7 +326,6 @@ export function registerMailCommands(cli: Goke) {
 
       const lastMsg = thread.messages[thread.messages.length - 1]!
 
-      // Resolve body
       let body = options.body ?? ''
       if (options.bodyFile) {
         if (options.bodyFile === '-') {
@@ -326,13 +344,11 @@ export function registerMailCommands(cli: Goke) {
         process.exit(1)
       }
 
-      // Build recipient list
       const replyTo = lastMsg.replyTo ?? lastMsg.from.email
       const to = [{ email: replyTo }]
 
       let cc: Array<{ email: string }> | undefined
       if (options.all) {
-        // Reply-all: include original To and Cc, excluding sender
         const profile = await client.getProfile()
         const myEmail = profile.emailAddress.toLowerCase()
 
@@ -340,20 +356,22 @@ export function registerMailCommands(cli: Goke) {
           ...lastMsg.to.map((r) => r.email),
           ...(lastMsg.cc?.map((r) => r.email) ?? []),
         ]
-          .filter((email) => email.toLowerCase() !== myEmail)
-          .filter((email) => email.toLowerCase() !== replyTo.toLowerCase())
+          .filter((e) => e.toLowerCase() !== myEmail)
+          .filter((e) => e.toLowerCase() !== replyTo.toLowerCase())
 
         if (allRecipients.length > 0) {
-          cc = allRecipients.map((email) => ({ email }))
+          cc = allRecipients.map((e) => ({ email: e }))
         }
       }
 
       if (options.cc) {
-        const extra = options.cc.split(',').map((e) => ({ email: e.trim() })).filter((e) => e.email)
+        const extra = options.cc
+          .split(',')
+          .map((e: string) => ({ email: e.trim() }))
+          .filter((e: { email: string }) => e.email)
         cc = [...(cc ?? []), ...extra]
       }
 
-      // Build references chain
       const refs = [lastMsg.references, lastMsg.messageId].filter(Boolean).join(' ')
 
       const result = await client.sendMessage({
@@ -367,11 +385,8 @@ export function registerMailCommands(cli: Goke) {
         fromEmail: options.from,
       })
 
-      // Invalidate cache
-      const cache = new GmailCache()
-      cache.invalidateThread(threadId)
-      cache.invalidateThreadLists()
-      cache.close()
+      await cache.invalidateThread(email, threadId)
+      await cache.invalidateThreadLists(email)
 
       out.printYaml(result)
       out.success('Reply sent')
@@ -386,20 +401,14 @@ export function registerMailCommands(cli: Goke) {
     .option('--to <to>', z.string().describe('Forward recipient(s), comma-separated'))
     .option('--body <body>', z.string().describe('Optional message to prepend'))
     .option('--from <from>', z.string().describe('Send-as alias email'))
-    .action(async (threadId: string, options: {
-      to?: string
-      body?: string
-      from?: string
-    }) => {
+    .action(async (threadId, options) => {
       if (!options.to) {
         out.error('--to is required')
         process.exit(1)
       }
 
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
+      const { email, client } = await getClient(options.account)
 
-      // Fetch thread to get the message to forward
       const thread = await client.getThread({ threadId })
       if (thread.messages.length === 0) {
         out.error('No messages in thread')
@@ -421,7 +430,10 @@ export function registerMailCommands(cli: Goke) {
         forwardedBody,
       ].join('\n')
 
-      const recipients = options.to.split(',').map((e) => ({ email: e.trim() })).filter((e) => e.email)
+      const recipients = options.to
+        .split(',')
+        .map((e: string) => ({ email: e.trim() }))
+        .filter((e: { email: string }) => e.email)
 
       const result = await client.sendMessage({
         to: recipients,
@@ -430,10 +442,7 @@ export function registerMailCommands(cli: Goke) {
         fromEmail: options.from,
       })
 
-      // Invalidate cache
-      const cache = new GmailCache()
-      cache.invalidateThreadLists()
-      cache.close()
+      await cache.invalidateThreadLists(email)
 
       out.printYaml(result)
       out.success(`Forwarded to ${options.to}`)

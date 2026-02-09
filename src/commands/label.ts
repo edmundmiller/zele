@@ -1,11 +1,12 @@
 // Label commands: list, get, create, delete, counts.
 // Manages Gmail labels with YAML output and cache integration.
+// Multi-account: list and counts fetch all accounts concurrently and merge.
 
 import type { Goke } from 'goke'
 import { z } from 'zod'
-import { authenticate } from '../auth.js'
+import { getClients, getClient } from '../auth.js'
 import { GmailClient } from '../gmail-client.js'
-import { GmailCache } from '../gmail-cache.js'
+import * as cache from '../gmail-cache.js'
 import * as out from '../output.js'
 
 export function registerLabelCommands(cli: Goke) {
@@ -16,36 +17,65 @@ export function registerLabelCommands(cli: Goke) {
   cli
     .command('label list', 'List all labels')
     .option('--no-cache', 'Skip cache')
-    .action(async (options: { noCache?: boolean }) => {
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
-      const cache = options.noCache ? null : new GmailCache()
+    .action(async (options) => {
+      const clients = await getClients(options.account)
 
       type LabelList = Awaited<ReturnType<GmailClient['listLabels']>>
-      let labels = cache?.getCachedLabels<LabelList>()
-      if (!labels) {
-        labels = await client.listLabels()
-        cache?.cacheLabels(labels)
-      }
 
-      cache?.close()
+      // Fetch from all accounts concurrently, tolerating individual failures
+      const settled = await Promise.allSettled(
+        clients.map(async ({ email, client }) => {
+          if (!options.noCache) {
+            const cached = await cache.getCachedLabels<LabelList>(email)
+            if (cached) return { email, labels: cached }
+          }
 
-      if (labels.length === 0) {
+          const labels = await client.listLabels()
+          if (!options.noCache) {
+            await cache.cacheLabels(email, labels)
+          }
+
+          return { email, labels }
+        }),
+      )
+
+      const allResults = settled
+        .filter((r): r is PromiseFulfilledResult<{ email: string; labels: LabelList }> => {
+          if (r.status === 'rejected') {
+            out.error(`Failed to fetch labels: ${r.reason}`)
+            return false
+          }
+          return true
+        })
+        .map((r) => r.value)
+
+      // Merge labels from all accounts
+      const merged = allResults.flatMap(({ email, labels }) =>
+        labels.map((l) => ({ ...l, account: email })),
+      )
+
+      if (merged.length === 0) {
         out.hint('No labels found')
         return
       }
 
       // Sort: user labels first, then system
-      const sorted = [...labels].sort((a, b) => {
+      const sorted = [...merged].sort((a, b) => {
         if (a.type !== b.type) return a.type === 'user' ? -1 : 1
         return a.name.localeCompare(b.name)
       })
 
+      const showAccount = clients.length > 1
       out.printList(
-        sorted.map((l) => ({ id: l.id, name: l.name, type: l.type })),
+        sorted.map((l) => ({
+          ...(showAccount ? { account: l.account } : {}),
+          id: l.id,
+          name: l.name,
+          type: l.type,
+        })),
       )
 
-      out.hint(`${labels.length} label(s)`)
+      out.hint(`${merged.length} label(s)`)
     })
 
   // =========================================================================
@@ -54,9 +84,8 @@ export function registerLabelCommands(cli: Goke) {
 
   cli
     .command('label get <labelId>', 'Get label details with counts')
-    .action(async (labelId: string) => {
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
+    .action(async (labelId, options) => {
+      const { client } = await getClient(options.account)
 
       const label = await client.getLabel({ labelId })
 
@@ -79,12 +108,8 @@ export function registerLabelCommands(cli: Goke) {
     .command('label create <name>', 'Create a new label')
     .option('--bg-color <bgColor>', z.string().describe('Background color (hex, e.g. #4986e7)'))
     .option('--text-color <textColor>', z.string().describe('Text color (hex, e.g. #ffffff)'))
-    .action(async (name: string, options: {
-      bgColor?: string
-      textColor?: string
-    }) => {
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
+    .action(async (name, options) => {
+      const { email, client } = await getClient(options.account)
 
       const result = await client.createLabel({
         name,
@@ -93,10 +118,7 @@ export function registerLabelCommands(cli: Goke) {
           : undefined,
       })
 
-      // Invalidate cache
-      const cache = new GmailCache()
-      cache.invalidateLabels()
-      cache.close()
+      await cache.invalidateLabels(email)
 
       out.printYaml(result)
       out.success(`Label created: "${result.name}"`)
@@ -109,7 +131,7 @@ export function registerLabelCommands(cli: Goke) {
   cli
     .command('label delete <labelId>', 'Delete a label')
     .option('--force', 'Skip confirmation')
-    .action(async (labelId: string, options: { force?: boolean }) => {
+    .action(async (labelId, options) => {
       if (!options.force && process.stdin.isTTY) {
         const readline = await import('node:readline')
         const rl = readline.createInterface({ input: process.stdin, output: process.stderr })
@@ -124,16 +146,12 @@ export function registerLabelCommands(cli: Goke) {
         }
       }
 
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
+      const { email, client } = await getClient(options.account)
 
       await client.deleteLabel({ labelId })
 
-      // Invalidate cache
-      const cache = new GmailCache()
-      cache.invalidateLabels()
-      cache.invalidateLabelCounts()
-      cache.close()
+      await cache.invalidateLabels(email)
+      await cache.invalidateLabelCounts(email)
 
       out.printYaml({ label_id: labelId, deleted: true })
     })
@@ -145,30 +163,58 @@ export function registerLabelCommands(cli: Goke) {
   cli
     .command('label counts', 'Show unread counts per label')
     .option('--no-cache', 'Skip cache')
-    .action(async (options: { noCache?: boolean }) => {
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
-      const cache = options.noCache ? null : new GmailCache()
+    .action(async (options) => {
+      const clients = await getClients(options.account)
 
       type CountList = Awaited<ReturnType<GmailClient['getLabelCounts']>>
-      let counts = cache?.getCachedLabelCounts<CountList>()
-      if (!counts) {
-        counts = await client.getLabelCounts()
-        cache?.cacheLabelCounts(counts)
-      }
 
-      cache?.close()
+      // Fetch from all accounts concurrently, tolerating individual failures
+      const settled = await Promise.allSettled(
+        clients.map(async ({ email, client }) => {
+          if (!options.noCache) {
+            const cached = await cache.getCachedLabelCounts<CountList>(email)
+            if (cached) return { email, counts: cached }
+          }
+
+          const counts = await client.getLabelCounts()
+          if (!options.noCache) {
+            await cache.cacheLabelCounts(email, counts)
+          }
+
+          return { email, counts }
+        }),
+      )
+
+      const allResults = settled
+        .filter((r): r is PromiseFulfilledResult<{ email: string; counts: CountList }> => {
+          if (r.status === 'rejected') {
+            out.error(`Failed to fetch counts: ${r.reason}`)
+            return false
+          }
+          return true
+        })
+        .map((r) => r.value)
+
+      // Merge counts from all accounts
+      const merged = allResults.flatMap(({ email, counts }) =>
+        counts.map((c) => ({ ...c, account: email })),
+      )
 
       // Filter to labels with counts > 0 and sort descending
-      const withCounts = counts.filter((c) => c.count > 0).sort((a, b) => b.count - a.count)
+      const withCounts = merged.filter((c) => c.count > 0).sort((a, b) => b.count - a.count)
 
       if (withCounts.length === 0) {
         out.hint('All clear — no unread messages')
         return
       }
 
+      const showAccount = clients.length > 1
       out.printList(
-        withCounts.map((c) => ({ label: c.label, count: c.count })),
+        withCounts.map((c) => ({
+          ...(showAccount ? { account: c.account } : {}),
+          label: c.label,
+          count: c.count,
+        })),
       )
     })
 }

@@ -3,9 +3,9 @@
 
 import type { Goke } from 'goke'
 import { z } from 'zod'
-import { authenticate } from '../auth.js'
+import { getClient } from '../auth.js'
 import { GmailClient } from '../gmail-client.js'
-import { GmailCache } from '../gmail-cache.js'
+import * as cache from '../gmail-cache.js'
 import * as out from '../output.js'
 
 // ---------------------------------------------------------------------------
@@ -15,6 +15,7 @@ import * as out from '../output.js'
 async function bulkAction(
   threadIds: string[],
   actionName: string,
+  account: string[] | undefined,
   fn: (client: GmailClient, ids: string[]) => Promise<void>,
 ) {
   if (threadIds.length === 0) {
@@ -22,17 +23,14 @@ async function bulkAction(
     process.exit(1)
   }
 
-  const auth = await authenticate()
-  const client = new GmailClient({ auth })
+  const { email, client } = await getClient(account)
 
   await fn(client, threadIds)
 
   // Invalidate caches
-  const cache = new GmailCache()
-  cache.invalidateThreads(threadIds)
-  cache.invalidateThreadLists()
-  cache.invalidateLabelCounts()
-  cache.close()
+  await cache.invalidateThreads(email, threadIds)
+  await cache.invalidateThreadLists(email)
+  await cache.invalidateLabelCounts(email)
 
   out.printYaml({ action: actionName, thread_ids: threadIds, success: true })
 }
@@ -44,81 +42,76 @@ async function bulkAction(
 export function registerMailActionCommands(cli: Goke) {
   cli
     .command('mail star [...threadIds]', 'Star threads')
-    .action(async (threadIds: string[]) => {
-      await bulkAction(threadIds, 'Starred', (c, ids) => c.star({ threadIds: ids }))
+    .action(async (threadIds, options) => {
+      await bulkAction(threadIds, 'Starred', options.account, (c, ids) => c.star({ threadIds: ids }))
     })
 
   cli
     .command('mail unstar [...threadIds]', 'Remove star from threads')
-    .action(async (threadIds: string[]) => {
-      await bulkAction(threadIds, 'Unstarred', (c, ids) => c.unstar({ threadIds: ids }))
+    .action(async (threadIds, options) => {
+      await bulkAction(threadIds, 'Unstarred', options.account, (c, ids) => c.unstar({ threadIds: ids }))
     })
 
   cli
     .command('mail archive [...threadIds]', 'Archive threads (remove from inbox)')
-    .action(async (threadIds: string[]) => {
-      await bulkAction(threadIds, 'Archived', (c, ids) => c.archive({ threadIds: ids }))
+    .action(async (threadIds, options) => {
+      await bulkAction(threadIds, 'Archived', options.account, (c, ids) => c.archive({ threadIds: ids }))
     })
 
   cli
     .command('mail trash <threadId>', 'Move thread to trash')
-    .action(async (threadId: string) => {
-      await bulkAction([threadId], 'Trashed', (c, ids) => c.trash({ threadId: ids[0]! }))
+    .action(async (threadId, options) => {
+      await bulkAction([threadId], 'Trashed', options.account, (c, ids) => c.trash({ threadId: ids[0]! }))
     })
 
   cli
     .command('mail untrash <threadId>', 'Remove thread from trash')
-    .action(async (threadId: string) => {
-      await bulkAction([threadId], 'Untrashed', (c, ids) => c.untrash({ threadId: ids[0]! }))
+    .action(async (threadId, options) => {
+      await bulkAction([threadId], 'Untrashed', options.account, (c, ids) => c.untrash({ threadId: ids[0]! }))
     })
 
   cli
     .command('mail read-mark [...threadIds]', 'Mark threads as read')
-    .action(async (threadIds: string[]) => {
-      await bulkAction(threadIds, 'Marked as read', (c, ids) => c.markAsRead({ threadIds: ids }))
+    .action(async (threadIds, options) => {
+      await bulkAction(threadIds, 'Marked as read', options.account, (c, ids) => c.markAsRead({ threadIds: ids }))
     })
 
   cli
     .command('mail unread-mark [...threadIds]', 'Mark threads as unread')
-    .action(async (threadIds: string[]) => {
-      await bulkAction(threadIds, 'Marked as unread', (c, ids) => c.markAsUnread({ threadIds: ids }))
+    .action(async (threadIds, options) => {
+      await bulkAction(threadIds, 'Marked as unread', options.account, (c, ids) => c.markAsUnread({ threadIds: ids }))
     })
 
   cli
     .command('mail label [...threadIds]', 'Add or remove labels from threads')
     .option('--add <add>', z.string().describe('Labels to add (comma-separated)'))
     .option('--remove <remove>', z.string().describe('Labels to remove (comma-separated)'))
-    .action(async (threadIds: string[], options: {
-      add?: string
-      remove?: string
-    }) => {
+    .action(async (threadIds, options) => {
       if (!options.add && !options.remove) {
         out.error('At least one of --add or --remove is required')
         process.exit(1)
       }
 
-      const addLabels = options.add?.split(',').map((l) => l.trim()).filter(Boolean) ?? []
-      const removeLabels = options.remove?.split(',').map((l) => l.trim()).filter(Boolean) ?? []
+      const addLabels = options.add?.split(',').map((l: string) => l.trim()).filter(Boolean) ?? []
+      const removeLabels = options.remove?.split(',').map((l: string) => l.trim()).filter(Boolean) ?? []
 
       await bulkAction(
         threadIds,
         'Labels modified',
+        options.account,
         (c, ids) => c.modifyLabels({ threadIds: ids, addLabelIds: addLabels, removeLabelIds: removeLabels }),
       )
     })
 
   cli
     .command('mail trash-spam', 'Trash all spam threads')
-    .action(async () => {
-      const auth = await authenticate()
-      const client = new GmailClient({ auth })
+    .action(async (options) => {
+      const { email, client } = await getClient(options.account)
 
       const result = await client.trashAllSpam()
 
-      const cache = new GmailCache()
-      cache.invalidateThreadLists()
-      cache.invalidateLabelCounts()
-      cache.close()
+      await cache.invalidateThreadLists(email)
+      await cache.invalidateLabelCounts(email)
 
       out.printYaml(result)
       out.success(`Trashed ${result.count} spam thread(s)`)

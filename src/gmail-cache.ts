@@ -1,20 +1,9 @@
-// SQLite-based cache for Gmail API responses.
-// Uses better-sqlite3 for synchronous reads (instant cache hits) and TTL-based expiry.
-// Stores JSON blobs keyed by operation + params hash. Two tables: `cache` for TTL data,
-// `sync_state` for persistent values like history ID watermark.
+// Prisma-based cache for Gmail API responses.
+// Each cache entry is scoped to an account email. TTL-based expiry is checked
+// at read time. All methods are async (Prisma is async).
+// Single SQLite DB shared across all accounts via the Prisma singleton.
 
-import Database from 'better-sqlite3'
-import fs from 'node:fs'
-import path from 'node:path'
-import os from 'node:os'
-import crypto from 'node:crypto'
-
-const DEFAULT_DB_DIR = path.join(os.homedir(), '.gtui')
-const DEFAULT_DB_PATH = path.join(DEFAULT_DB_DIR, 'cache.db')
-
-// Row shapes for typed .prepare() queries
-interface CacheRow { value: string; ttl_ms: number; created_at: number }
-interface SyncRow { value: string }
+import { getPrisma } from './db.js'
 
 // TTL constants in milliseconds
 export const TTL = {
@@ -25,208 +14,231 @@ export const TTL = {
   LABEL_COUNTS: 2 * 60 * 1000, // 2 minutes
 } as const
 
-export class GmailCache {
-  private db: Database.Database
+function isExpired(createdAt: Date, ttlMs: number): boolean {
+  return createdAt.getTime() + ttlMs < Date.now()
+}
 
-  constructor({ dbPath }: { dbPath?: string } = {}) {
-    const resolvedPath = dbPath ?? DEFAULT_DB_PATH
-    const dir = path.dirname(resolvedPath)
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true })
-    }
+// ---------------------------------------------------------------------------
+// Thread list cache
+// ---------------------------------------------------------------------------
 
-    this.db = new Database(resolvedPath)
-    this.db.pragma('journal_mode = WAL')
-    this.db.pragma('synchronous = NORMAL')
-    this.init()
+export async function cacheThreadList(
+  email: string,
+  params: { folder?: string; query?: string; maxResults?: number; labelIds?: string[]; pageToken?: string },
+  data: unknown,
+): Promise<void> {
+  const prisma = await getPrisma()
+  // Encode maxResults into the query field so different page sizes get separate cache entries
+  const queryWithMax = [params.query ?? '', params.maxResults ? `__max:${params.maxResults}` : ''].filter(Boolean).join('|')
+  const where = {
+    email,
+    folder: params.folder ?? '',
+    query: queryWithMax,
+    label_ids: params.labelIds?.join(',') ?? '',
+    page_token: params.pageToken ?? '',
   }
 
-  private init() {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS cache (
-        key        TEXT PRIMARY KEY,
-        value      TEXT NOT NULL,
-        ttl_ms     INTEGER NOT NULL,
-        created_at INTEGER NOT NULL
-      );
+  await prisma.thread_lists.upsert({
+    where: { email_folder_query_label_ids_page_token: where },
+    create: { ...where, data: JSON.stringify(data), ttl_ms: TTL.THREAD_LIST },
+    update: { data: JSON.stringify(data), ttl_ms: TTL.THREAD_LIST, created_at: new Date() },
+  })
+}
 
-      CREATE TABLE IF NOT EXISTS sync_state (
-        key   TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      );
-    `)
-  }
+export async function getCachedThreadList<T = unknown>(
+  email: string,
+  params: { folder?: string; query?: string; maxResults?: number; labelIds?: string[]; pageToken?: string },
+): Promise<T | undefined> {
+  const prisma = await getPrisma()
+  const queryWithMax = [params.query ?? '', params.maxResults ? `__max:${params.maxResults}` : ''].filter(Boolean).join('|')
+  const row = await prisma.thread_lists.findUnique({
+    where: {
+      email_folder_query_label_ids_page_token: {
+        email,
+        folder: params.folder ?? '',
+        query: queryWithMax,
+        label_ids: params.labelIds?.join(',') ?? '',
+        page_token: params.pageToken ?? '',
+      },
+    },
+  })
 
-  // ---------------------------------------------------------------------------
-  // Generic cache operations
-  // ---------------------------------------------------------------------------
+  if (!row || isExpired(row.created_at, row.ttl_ms)) return undefined
+  return JSON.parse(row.data) as T
+}
 
-  private cacheKey(prefix: string, params?: Record<string, unknown>) {
-    if (!params || Object.keys(params).length === 0) return prefix
-    const hash = crypto
-      .createHash('sha256')
-      .update(JSON.stringify(params))
-      .digest('hex')
-      .slice(0, 16)
-    return `${prefix}:${hash}`
-  }
+export async function invalidateThreadLists(email: string): Promise<void> {
+  const prisma = await getPrisma()
+  await prisma.thread_lists.deleteMany({ where: { email } })
+}
 
-  private get<T>(key: string): T | undefined {
-    const row = this.db
-      .prepare<[string], CacheRow>('SELECT value, ttl_ms, created_at FROM cache WHERE key = ?')
-      .get(key)
+// ---------------------------------------------------------------------------
+// Individual thread cache
+// ---------------------------------------------------------------------------
 
-    if (!row) return undefined
+export async function cacheThread(
+  email: string,
+  threadId: string,
+  data: unknown,
+): Promise<void> {
+  const prisma = await getPrisma()
+  await prisma.threads.upsert({
+    where: { email_thread_id: { email, thread_id: threadId } },
+    create: { email, thread_id: threadId, data: JSON.stringify(data), ttl_ms: TTL.THREAD },
+    update: { data: JSON.stringify(data), ttl_ms: TTL.THREAD, created_at: new Date() },
+  })
+}
 
-    const expired = row.created_at + row.ttl_ms < Date.now()
-    if (expired) {
-      this.db.prepare('DELETE FROM cache WHERE key = ?').run(key)
-      return undefined
-    }
+export async function getCachedThread<T = unknown>(
+  email: string,
+  threadId: string,
+): Promise<T | undefined> {
+  const prisma = await getPrisma()
+  const row = await prisma.threads.findUnique({
+    where: { email_thread_id: { email, thread_id: threadId } },
+  })
 
-    return JSON.parse(row.value) as T
-  }
+  if (!row || isExpired(row.created_at, row.ttl_ms)) return undefined
+  return JSON.parse(row.data) as T
+}
 
-  private set(key: string, value: unknown, ttlMs: number) {
-    this.db
-      .prepare(
-        'INSERT OR REPLACE INTO cache (key, value, ttl_ms, created_at) VALUES (?, ?, ?, ?)',
-      )
-      .run(key, JSON.stringify(value), ttlMs, Date.now())
-  }
+export async function invalidateThread(email: string, threadId: string): Promise<void> {
+  const prisma = await getPrisma()
+  await prisma.threads.deleteMany({ where: { email, thread_id: threadId } })
+}
 
-  private invalidateByPrefix(prefix: string) {
-    this.db.prepare("DELETE FROM cache WHERE key LIKE ? || '%'").run(prefix)
-  }
+export async function invalidateThreads(email: string, threadIds: string[]): Promise<void> {
+  const prisma = await getPrisma()
+  await prisma.threads.deleteMany({ where: { email, thread_id: { in: threadIds } } })
+}
 
-  // ---------------------------------------------------------------------------
-  // Thread list cache
-  // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Labels cache
+// ---------------------------------------------------------------------------
 
-  cacheThreadList(
-    params: { folder?: string; query?: string; labelIds?: string[]; pageToken?: string },
-    data: unknown,
-  ) {
-    const key = this.cacheKey('thread-list', params)
-    this.set(key, data, TTL.THREAD_LIST)
-  }
+export async function cacheLabels(email: string, data: unknown): Promise<void> {
+  const prisma = await getPrisma()
+  await prisma.labels.upsert({
+    where: { email },
+    create: { email, data: JSON.stringify(data), ttl_ms: TTL.LABELS },
+    update: { data: JSON.stringify(data), ttl_ms: TTL.LABELS, created_at: new Date() },
+  })
+}
 
-  getCachedThreadList<T = unknown>(params: {
-    folder?: string
-    query?: string
-    labelIds?: string[]
-    pageToken?: string
-  }) {
-    const key = this.cacheKey('thread-list', params)
-    return this.get<T>(key)
-  }
+export async function getCachedLabels<T = unknown>(email: string): Promise<T | undefined> {
+  const prisma = await getPrisma()
+  const row = await prisma.labels.findUnique({ where: { email } })
+  if (!row || isExpired(row.created_at, row.ttl_ms)) return undefined
+  return JSON.parse(row.data) as T
+}
 
-  invalidateThreadLists() {
-    this.invalidateByPrefix('thread-list')
-  }
+export async function invalidateLabels(email: string): Promise<void> {
+  const prisma = await getPrisma()
+  await prisma.labels.deleteMany({ where: { email } })
+}
 
-  // ---------------------------------------------------------------------------
-  // Individual thread cache
-  // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Label counts cache
+// ---------------------------------------------------------------------------
 
-  cacheThread(threadId: string, data: unknown) {
-    this.set(`thread:${threadId}`, data, TTL.THREAD)
-  }
+export async function cacheLabelCounts(email: string, data: unknown): Promise<void> {
+  const prisma = await getPrisma()
+  await prisma.label_counts.upsert({
+    where: { email },
+    create: { email, data: JSON.stringify(data), ttl_ms: TTL.LABEL_COUNTS },
+    update: { data: JSON.stringify(data), ttl_ms: TTL.LABEL_COUNTS, created_at: new Date() },
+  })
+}
 
-  getCachedThread<T = unknown>(threadId: string) {
-    return this.get<T>(`thread:${threadId}`)
-  }
+export async function getCachedLabelCounts<T = unknown>(email: string): Promise<T | undefined> {
+  const prisma = await getPrisma()
+  const row = await prisma.label_counts.findUnique({ where: { email } })
+  if (!row || isExpired(row.created_at, row.ttl_ms)) return undefined
+  return JSON.parse(row.data) as T
+}
 
-  invalidateThread(threadId: string) {
-    this.db.prepare('DELETE FROM cache WHERE key = ?').run(`thread:${threadId}`)
-  }
+export async function invalidateLabelCounts(email: string): Promise<void> {
+  const prisma = await getPrisma()
+  await prisma.label_counts.deleteMany({ where: { email } })
+}
 
-  invalidateThreads(threadIds: string[]) {
-    const del = this.db.prepare('DELETE FROM cache WHERE key = ?')
-    const tx = this.db.transaction((ids: string[]) => {
-      for (const id of ids) {
-        del.run(`thread:${id}`)
-      }
-    })
-    tx(threadIds)
-  }
+// ---------------------------------------------------------------------------
+// Profile cache
+// ---------------------------------------------------------------------------
 
-  // ---------------------------------------------------------------------------
-  // Labels cache
-  // ---------------------------------------------------------------------------
+export async function cacheProfile(email: string, data: unknown): Promise<void> {
+  const prisma = await getPrisma()
+  await prisma.profiles.upsert({
+    where: { email },
+    create: { email, data: JSON.stringify(data), ttl_ms: TTL.PROFILE },
+    update: { data: JSON.stringify(data), ttl_ms: TTL.PROFILE, created_at: new Date() },
+  })
+}
 
-  cacheLabels(labels: unknown) {
-    this.set('labels', labels, TTL.LABELS)
-  }
+export async function getCachedProfile<T = unknown>(email: string): Promise<T | undefined> {
+  const prisma = await getPrisma()
+  const row = await prisma.profiles.findUnique({ where: { email } })
+  if (!row || isExpired(row.created_at, row.ttl_ms)) return undefined
+  return JSON.parse(row.data) as T
+}
 
-  getCachedLabels<T = unknown>() {
-    return this.get<T>('labels')
-  }
+// ---------------------------------------------------------------------------
+// Sync state (persistent, no TTL)
+// ---------------------------------------------------------------------------
 
-  invalidateLabels() {
-    this.db.prepare('DELETE FROM cache WHERE key = ?').run('labels')
-  }
+export async function getLastHistoryId(email: string): Promise<string | undefined> {
+  const prisma = await getPrisma()
+  const row = await prisma.sync_states.findUnique({
+    where: { email_key: { email, key: 'history_id' } },
+  })
+  return row?.value
+}
 
-  // ---------------------------------------------------------------------------
-  // Label counts cache
-  // ---------------------------------------------------------------------------
+export async function setLastHistoryId(email: string, historyId: string): Promise<void> {
+  const prisma = await getPrisma()
+  await prisma.sync_states.upsert({
+    where: { email_key: { email, key: 'history_id' } },
+    create: { email, key: 'history_id', value: historyId },
+    update: { value: historyId },
+  })
+}
 
-  cacheLabelCounts(counts: unknown) {
-    this.set('label-counts', counts, TTL.LABEL_COUNTS)
-  }
+// ---------------------------------------------------------------------------
+// Housekeeping
+// ---------------------------------------------------------------------------
 
-  getCachedLabelCounts<T = unknown>() {
-    return this.get<T>('label-counts')
-  }
+export async function clearExpired(): Promise<void> {
+  const prisma = await getPrisma()
+  const now = Date.now()
+  // Use raw SQL for the timestamp arithmetic across all cache tables
+  await prisma.$executeRawUnsafe(
+    `DELETE FROM thread_lists WHERE (strftime('%s', created_at) * 1000 + ttl_ms) < ?`,
+    now,
+  )
+  await prisma.$executeRawUnsafe(
+    `DELETE FROM threads WHERE (strftime('%s', created_at) * 1000 + ttl_ms) < ?`,
+    now,
+  )
+  await prisma.$executeRawUnsafe(
+    `DELETE FROM labels WHERE (strftime('%s', created_at) * 1000 + ttl_ms) < ?`,
+    now,
+  )
+  await prisma.$executeRawUnsafe(
+    `DELETE FROM label_counts WHERE (strftime('%s', created_at) * 1000 + ttl_ms) < ?`,
+    now,
+  )
+  await prisma.$executeRawUnsafe(
+    `DELETE FROM profiles WHERE (strftime('%s', created_at) * 1000 + ttl_ms) < ?`,
+    now,
+  )
+}
 
-  invalidateLabelCounts() {
-    this.db.prepare('DELETE FROM cache WHERE key = ?').run('label-counts')
-  }
-
-  // ---------------------------------------------------------------------------
-  // Profile cache
-  // ---------------------------------------------------------------------------
-
-  cacheProfile(profile: unknown) {
-    this.set('profile', profile, TTL.PROFILE)
-  }
-
-  getCachedProfile<T = unknown>() {
-    return this.get<T>('profile')
-  }
-
-  // ---------------------------------------------------------------------------
-  // Sync state (persistent, no TTL)
-  // ---------------------------------------------------------------------------
-
-  getLastHistoryId() {
-    const row = this.db
-      .prepare<[string], SyncRow>('SELECT value FROM sync_state WHERE key = ?')
-      .get('history_id')
-    return row?.value
-  }
-
-  setLastHistoryId(historyId: string) {
-    this.db
-      .prepare('INSERT OR REPLACE INTO sync_state (key, value) VALUES (?, ?)')
-      .run('history_id', historyId)
-  }
-
-  // ---------------------------------------------------------------------------
-  // Housekeeping
-  // ---------------------------------------------------------------------------
-
-  clearExpired() {
-    this.db
-      .prepare('DELETE FROM cache WHERE created_at + ttl_ms < ?')
-      .run(Date.now())
-  }
-
-  clearAll() {
-    this.db.exec('DELETE FROM cache; DELETE FROM sync_state;')
-  }
-
-  close() {
-    this.db.close()
-  }
+export async function clearAll(email: string): Promise<void> {
+  const prisma = await getPrisma()
+  await prisma.thread_lists.deleteMany({ where: { email } })
+  await prisma.threads.deleteMany({ where: { email } })
+  await prisma.labels.deleteMany({ where: { email } })
+  await prisma.label_counts.deleteMany({ where: { email } })
+  await prisma.profiles.deleteMany({ where: { email } })
+  await prisma.sync_states.deleteMany({ where: { email } })
 }

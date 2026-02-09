@@ -1,0 +1,88 @@
+generator client {
+  provider = "prisma-client"
+  output   = "./src/generated"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model accounts {
+  email      String   @id
+  tokens     String // JSON-encoded OAuth2 Credentials
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  thread_lists  thread_lists[]
+  threads       threads[]
+  labels        labels?
+  label_counts  label_counts?
+  profiles      profiles?
+  sync_states   sync_states[]
+}
+
+model thread_lists {
+  id         Int      @id @default(autoincrement())
+  email      String
+  folder     String   @default("")
+  query      String   @default("")
+  label_ids  String   @default("")
+  page_token String   @default("")
+  data       String // JSON blob of ThreadListResult
+  ttl_ms     Int
+  created_at DateTime @default(now())
+
+  account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+
+  @@unique([email, folder, query, label_ids, page_token])
+}
+
+model threads {
+  id         Int      @id @default(autoincrement())
+  email      String
+  thread_id  String
+  data       String // JSON blob of ThreadData
+  ttl_ms     Int
+  created_at DateTime @default(now())
+
+  account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+
+  @@unique([email, thread_id])
+}
+
+model labels {
+  email      String   @id
+  data       String // JSON blob of label list
+  ttl_ms     Int
+  created_at DateTime @default(now())
+
+  account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+}
+
+model label_counts {
+  email      String   @id
+  data       String // JSON blob of label counts
+  ttl_ms     Int
+  created_at DateTime @default(now())
+
+  account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+}
+
+model profiles {
+  email      String   @id
+  data       String // JSON blob of profile
+  ttl_ms     Int
+  created_at DateTime @default(now())
+
+  account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+}
+
+model sync_states {
+  email String
+  key   String
+  value String
+
+  account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+
+  @@id([email, key])
+}
