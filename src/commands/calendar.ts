@@ -1,4 +1,4 @@
-// Calendar commands: list, events, get, create, update, delete, respond, freebusy, focus, ooo.
+// Calendar commands: list, events, get, create, update, delete, respond, freebusy.
 // Manages Google Calendar with YAML output and cache integration.
 // Multi-account: list/events fetch all accounts concurrently and merge by start time.
 // Improved UX over gogcli: multi-account by default, +duration syntax, cleaner output.
@@ -569,103 +569,6 @@ export function registerCalendarCommands(cli: Goke) {
       out.printList(items)
     })
 
-  // =========================================================================
-  // cal focus
-  // =========================================================================
-
-  cli
-    .command('cal focus', 'Create a Focus Time block')
-    .option('--calendar <calendar>', 'Calendar ID (default: primary)')
-    .option('--from <from>', z.string().describe('Start time'))
-    .option('--to <to>', z.string().describe('End time (or +1h, +2h relative to --from)'))
-    .option('--summary <summary>', 'Title (default: Focus Time)')
-    .option('--recurrence <recurrence>', 'Recurrence rule')
-    .action(async (options) => {
-      if (!options.from || !options.to) {
-        out.error('--from and --to are required')
-        process.exit(1)
-      }
-
-      const calendarId = options.calendar ?? 'primary'
-      const { email, client } = await getCalendarClient(options.account)
-      const tz = await client.getTimezone(calendarId)
-
-      const start = parseTimeExpression(options.from, tz)
-
-      // Support +duration syntax (e.g. +1h, +2h)
-      let end: string
-      const durationMs = parseDuration(options.to)
-      if (durationMs !== null) {
-        end = new Date(new Date(start).getTime() + durationMs).toISOString()
-      } else {
-        end = parseTimeExpression(options.to, tz)
-      }
-
-      const event = await client.createFocusTime({
-        calendarId,
-        start,
-        end,
-        summary: options.summary,
-        recurrence: options.recurrence ? [options.recurrence] : undefined,
-      })
-
-      await cache.invalidateCalendarEvents(email)
-
-      printEventDetail(event)
-      out.success('Focus Time created')
-    })
-
-  // =========================================================================
-  // cal ooo
-  // =========================================================================
-
-  cli
-    .command('cal ooo', 'Create Out of Office event')
-    .option('--calendar <calendar>', 'Calendar ID (default: primary)')
-    .option('--from <from>', z.string().describe('Start date (YYYY-MM-DD for all-day)'))
-    .option('--to <to>', z.string().describe('End date'))
-    .option('--summary <summary>', 'Title (default: Out of office)')
-    .option('--message <message>', 'Auto-decline message')
-    .action(async (options) => {
-      if (!options.from || !options.to) {
-        out.error('--from and --to are required')
-        process.exit(1)
-      }
-
-      const calendarId = options.calendar ?? 'primary'
-      const { email, client } = await getCalendarClient(options.account)
-
-      const allDay = isDateOnly(options.from) && isDateOnly(options.to)
-
-      let start: string
-      let end: string
-
-      if (allDay) {
-        start = options.from
-        // Calendar API uses exclusive end date: add 1 day
-        const endDate = new Date(options.to + 'T00:00:00')
-        endDate.setDate(endDate.getDate() + 1)
-        end = endDate.toISOString().split('T')[0]!
-      } else {
-        const tz = await client.getTimezone(calendarId)
-        start = parseTimeExpression(options.from, tz)
-        end = parseTimeExpression(options.to, tz)
-      }
-
-      const event = await client.createOutOfOffice({
-        calendarId,
-        start,
-        end,
-        summary: options.summary,
-        message: options.message,
-        allDay,
-      })
-
-      await cache.invalidateCalendarEvents(email)
-
-      printEventDetail(event)
-      out.success('Out of Office created')
-    })
 }
 
 // ---------------------------------------------------------------------------

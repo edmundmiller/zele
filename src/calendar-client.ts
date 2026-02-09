@@ -217,7 +217,8 @@ function parseICalData(data: string, calObj?: DAVCalendarObject): CalendarEvent[
   try {
     const calendar = convertIcsCalendar(undefined, data)
     return (calendar.events ?? []).map((ev) => icsEventToCalendarEvent(ev, calObj))
-  } catch {
+  } catch (err) {
+    console.error('[calendar] failed to parse iCal data:', err instanceof Error ? err.stack ?? err.message : err)
     return []
   }
 }
@@ -405,7 +406,8 @@ export class CalendarClient {
       const tz = extractTimezone(cal.timezone)
       this.timezoneCache[calendarId] = tz
       return tz
-    } catch {
+    } catch (err) {
+      console.error('[calendar] failed to resolve timezone for', calendarId, '-', err instanceof Error ? err.stack ?? err.message : err)
       const calendars = await this.listCalendars()
       const target = calendarId === 'primary' ? this.email : calendarId
       const match = calendars.find((c) => c.id.toLowerCase() === target.toLowerCase())
@@ -744,7 +746,8 @@ export class CalendarClient {
           .map((e) => ({ start: e.start, end: e.end }))
 
         results.push({ calendar: calId, busy })
-      } catch {
+      } catch (err) {
+        console.error('[calendar] freebusy failed for', calId, '-', err instanceof Error ? err.stack ?? err.message : err)
         results.push({ calendar: calId, busy: [] })
       }
     }
@@ -752,56 +755,4 @@ export class CalendarClient {
     return results
   }
 
-  // =========================================================================
-  // Focus Time / OOO helpers
-  // =========================================================================
-
-  async createFocusTime({
-    calendarId = 'primary',
-    start,
-    end,
-    summary = 'Focus Time',
-    recurrence,
-  }: {
-    calendarId?: string
-    start: string
-    end: string
-    summary?: string
-    recurrence?: string[]
-  }): Promise<CalendarEvent> {
-    return this.createEvent({
-      calendarId,
-      summary,
-      start,
-      end,
-      transparency: 'opaque',
-      recurrence,
-    })
-  }
-
-  async createOutOfOffice({
-    calendarId = 'primary',
-    start,
-    end,
-    summary = 'Out of office',
-    message = 'I am out of office and will respond when I return.',
-    allDay = false,
-  }: {
-    calendarId?: string
-    start: string
-    end: string
-    summary?: string
-    message?: string
-    allDay?: boolean
-  }): Promise<CalendarEvent> {
-    return this.createEvent({
-      calendarId,
-      summary,
-      start,
-      end,
-      allDay,
-      description: message,
-      transparency: 'opaque',
-    })
-  }
 }
