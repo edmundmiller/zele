@@ -2,7 +2,8 @@
 // Wraps the `email-addresses` package (RFC 5322 parser) with simpler return types.
 // Ported from Zero's apps/server/src/lib/email-utils.ts.
 
-import { parseFrom as _parseFrom, parseAddressList as _parseAddressList } from 'email-addresses'
+import emailAddresses from 'email-addresses'
+const { parseFrom: _parseFrom, parseAddressList: _parseAddressList } = emailAddresses
 
 export interface Sender {
   name?: string
