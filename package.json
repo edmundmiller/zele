@@ -4,9 +4,7 @@
   "description": "Gmail CLI — manage email from your terminal",
   "type": "module",
   "main": "dist/cli.js",
-  "bin": {
-    "gtui": "./dist/cli.js"
-  },
+  "bin": "./dist/cli.js",
   "scripts": {
     "build": "rm -rf dist && tsc",
     "prepublishOnly": "pnpm build",
