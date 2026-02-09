@@ -1,4 +1,4 @@
-// Auth commands: login, logout, status.
+// Auth commands: login, logout, whoami.
 // Manages OAuth2 authentication for zele.
 // Supports multiple accounts: login adds accounts, logout removes one.
 
@@ -8,14 +8,14 @@ import * as out from '../output.js'
 
 export function registerAuthCommands(cli: Goke) {
   cli
-    .command('auth login', 'Authenticate with Google (opens browser)')
+    .command('login', 'Authenticate with Google (opens browser)')
     .action(async () => {
       const { email } = await login()
       out.success(`Authenticated as ${email}`)
     })
 
   cli
-    .command('auth logout [email]', 'Remove stored credentials for an account')
+    .command('logout [email]', 'Remove stored credentials for an account')
     .option('--force', 'Skip confirmation')
     .action(async (email, options) => {
       const accounts = await listAccounts()
@@ -67,12 +67,12 @@ export function registerAuthCommands(cli: Goke) {
     })
 
   cli
-    .command('auth status', 'Show authentication status')
+    .command('whoami', 'Show authenticated accounts')
     .action(async () => {
       const statuses = await getAuthStatuses()
 
       if (statuses.length === 0) {
-        out.hint('Not authenticated. Run: zele auth login')
+        out.hint('Not authenticated. Run: zele login')
         return
       }
 

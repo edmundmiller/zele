@@ -27,16 +27,16 @@ cli.option(
 )
 
 // ---------------------------------------------------------------------------
-// Register all command modules
+// Register all command modules (auth first so login/logout/whoami appear at top of --help)
 // ---------------------------------------------------------------------------
 
 registerAuthCommands(cli)
+registerProfileCommands(cli)
 registerMailCommands(cli)
 registerMailActionCommands(cli)
 registerDraftCommands(cli)
 registerLabelCommands(cli)
 registerAttachmentCommands(cli)
-registerProfileCommands(cli)
 registerCalendarCommands(cli)
 
 // ---------------------------------------------------------------------------

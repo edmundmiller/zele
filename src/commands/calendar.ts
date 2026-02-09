@@ -49,7 +49,7 @@ export function registerCalendarCommands(cli: Goke) {
           if (r.status === 'rejected') {
             const msg = String(r.reason)
             if (msg.includes('401') || msg.includes('403') || msg.includes('Unauthorized')) {
-              out.error('CalDAV authentication failed. Try: zele auth login')
+              out.error('CalDAV authentication failed. Try: zele login')
             } else {
               out.error(`Failed to fetch calendars: ${msg}`)
             }
@@ -198,7 +198,7 @@ export function registerCalendarCommands(cli: Goke) {
           if (r.status === 'rejected') {
             const msg = String(r.reason)
             if (msg.includes('401') || msg.includes('403') || msg.includes('Unauthorized')) {
-              out.error('CalDAV authentication failed. Try: zele auth login')
+              out.error('CalDAV authentication failed. Try: zele login')
             } else {
               out.error(`Failed to fetch events: ${msg}`)
             }

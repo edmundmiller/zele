@@ -297,7 +297,7 @@ async function authenticateAccount(email: string): Promise<OAuth2Client> {
   const prisma = await getPrisma()
   const row = await prisma.accounts.findUnique({ where: { email } })
   if (!row) {
-    throw new Error(`No account found for ${email}. Run: zele auth login`)
+    throw new Error(`No account found for ${email}. Run: zele login`)
   }
 
   const tokens: Credentials = JSON.parse(row.tokens)
@@ -331,7 +331,7 @@ export async function getClients(
 
   const allEmails = await listAccounts()
   if (allEmails.length === 0) {
-    throw new Error('No accounts registered. Run: zele auth login')
+    throw new Error('No accounts registered. Run: zele login')
   }
 
   const emails = accounts && accounts.length > 0
@@ -385,7 +385,7 @@ export async function getCalendarClients(
 
   const allEmails = await listAccounts()
   if (allEmails.length === 0) {
-    throw new Error('No accounts registered. Run: zele auth login')
+    throw new Error('No accounts registered. Run: zele login')
   }
 
   const emails = accounts && accounts.length > 0
