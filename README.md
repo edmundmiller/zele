@@ -60,28 +60,28 @@ zele mail trash-spam
 
 `mail search` and `mail watch --query` use [Gmail search operators](https://support.google.com/mail/answer/7190). `mail search` sends the query server-side (full Gmail support), while `mail watch --query` evaluates a subset client-side.
 
-| Operator                         | Example               | Description                                |
-| -------------------------------- | --------------------- | ------------------------------------------ |
-| `from:`                          | `from:github`         | Messages from a sender                     |
-| `to:`                            | `to:me@example.com`   | Messages sent to a recipient               |
-| `cc:`                            | `cc:team@example.com` | Messages where recipient was CC'd          |
-| `subject:`                       | `subject:invoice`     | Messages with words in the subject         |
-| `label:`                         | `label:work`          | Messages with a specific label             |
-| `is:unread`                      | `is:unread`           | Unread messages                            |
-| `is:read`                        | `is:read`             | Read messages                              |
-| `is:starred`                     | `is:starred`          | Starred messages                           |
-| `has:attachment`                 | `has:attachment`      | Messages with attachments                  |
-| `in:`                            | `in:sent`             | Messages in a folder (search only)         |
-| `after:`                         | `after:2024/01/01`    | Messages after a date (search only)        |
-| `before:`                        | `before:2024/12/31`   | Messages before a date (search only)       |
-| `newer_than:`                    | `newer_than:7d`       | Messages newer than a period (search only) |
-| `older_than:`                    | `older_than:1m`       | Messages older than a period (search only) |
-| `filename:`                      | `filename:pdf`        | Attachment filename (search only)          |
-| `size:` / `larger:` / `smaller:` | `larger:5M`           | Filter by message size (search only)       |
-| `-` (negate)                     | `-from:noreply`       | Exclude matching messages                  |
-| `" "` (quotes)                   | `"exact phrase"`      | Match an exact phrase                      |
-| `OR`                             | `from:a OR from:b`    | Match either term (search only)            |
-| `{ }`                            | `{from:a from:b}`     | Group OR terms (search only)               |
+| Operator | Example | Description |
+|---|---|---|
+| `from:` | `from:github` | Messages from a sender |
+| `to:` | `to:me@example.com` | Messages sent to a recipient |
+| `cc:` | `cc:team@example.com` | Messages where recipient was CC'd |
+| `subject:` | `subject:invoice` | Messages with words in the subject |
+| `is:unread` | `is:unread` | Unread messages |
+| `is:read` | `is:read` | Read messages |
+| `is:starred` | `is:starred` | Starred messages |
+| `has:attachment` | `has:attachment` | Messages with attachments (heuristic in watch) |
+| `-` (negate) | `-from:noreply` | Exclude matching messages |
+| `" "` (quotes) | `"exact phrase"` | Match an exact phrase |
+| `label:` | `label:work` | Messages with a specific label (search only) |
+| `in:` | `in:sent` | Messages in a folder (search only) |
+| `after:` | `after:2024/01/01` | Messages after a date (search only) |
+| `before:` | `before:2024/12/31` | Messages before a date (search only) |
+| `newer_than:` | `newer_than:7d` | Messages newer than a period (search only) |
+| `older_than:` | `older_than:1m` | Messages older than a period (search only) |
+| `filename:` | `filename:pdf` | Attachment filename (search only) |
+| `size:` / `larger:` / `smaller:` | `larger:5M` | Filter by message size (search only) |
+| `OR` | `from:a OR from:b` | Match either term (search only) |
+| `{ }` | `{from:a from:b}` | Group OR terms (search only) |
 
 Combine multiple operators to narrow results:
 
@@ -90,7 +90,7 @@ zele mail search "from:github is:unread newer_than:7d"
 zele mail watch --query "from:github has:attachment"
 ```
 
-Operators marked **(search only)** are handled server-side by Gmail and are only available in `mail search`, not `mail watch --query`.
+Operators marked **(search only)** are handled server-side by Gmail and only available in `mail search`. Using them in `mail watch --query` prints a warning and skips the operator.
 
 ### Drafts
 

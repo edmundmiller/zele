@@ -34,7 +34,7 @@ export function registerWatchCommands(cli: Goke) {
     .command('mail watch', 'Watch for new emails (poll via History API)')
     .option('--interval [interval]', z.string().describe('Poll interval in seconds (default: 15)'))
     .option('--folder [folder]', z.string().describe('Folder to watch (default: inbox)'))
-    .option('--query [query]', z.string().describe('Filter messages client-side using Gmail search operators (from:, to:, subject:, is:unread, has:attachment, etc). See https://support.google.com/mail/answer/7190'))
+    .option('--query [query]', z.string().describe('Filter messages client-side (from:, to:, cc:, subject:, is:unread, is:starred, has:attachment, -negate). See https://support.google.com/mail/answer/7190'))
     .option('--once', z.boolean().describe('Print changes once and exit (no loop)'))
     .action(async (options) => {
       const interval = options.interval ? Number(options.interval) : 15
@@ -215,11 +215,31 @@ function isHistoryExpired(err: any): boolean {
 // ---------------------------------------------------------------------------
 // The History API doesn't support server-side query filtering, so we parse
 // common Gmail search operators and match against message metadata.
-// Supported operators: from:, to:, cc:, subject:, is:unread, is:starred,
-// has:attachment, label:, and plain text (matches subject + from).
-// Multiple terms are AND-ed together. Quoted phrases are supported.
+//
+// Supported operators: from:, to:, cc:, subject:, is:unread/read/starred,
+// has:attachment, and plain text (matches subject + from).
+// Multiple terms are AND-ed together. Quoted phrases and negation supported.
+//
+// Limitations vs full Gmail search:
+// - label: not supported (labelIds are API IDs like Label_123, not names)
+// - has:attachment uses Content-Type heuristic (metadata format lacks parts)
+// - OR, {}, newer_than:, older_than:, etc. are server-only — warned & skipped
+//
 // See https://support.google.com/mail/answer/7190 for the full Gmail spec.
 // ---------------------------------------------------------------------------
+
+// Operators that only work server-side in Gmail search — we skip these
+// with a warning rather than silently treating them as plain text.
+const SERVER_ONLY_OPERATORS = new Set([
+  'in', 'label', 'after', 'before', 'newer_than', 'older_than',
+  'filename', 'size', 'larger', 'smaller', 'deliveredto', 'rfc822msgid',
+  'list', 'category',
+])
+
+// Set of operators we support client-side
+const SUPPORTED_OPERATORS = new Set([
+  'from', 'to', 'cc', 'subject', 'is', 'has',
+])
 
 interface MatchableMessage {
   subject: string
@@ -229,8 +249,10 @@ interface MatchableMessage {
   labelIds: string[]
   unread: boolean
   starred: boolean
-  attachments: Array<{ filename: string }>
+  mimeType: string // Content-Type of the message — used for attachment heuristic
 }
+
+let warnedOperators = new Set<string>()
 
 function matchesQuery(msg: MatchableMessage, query: string): boolean {
   const terms = parseQueryTerms(query)
@@ -238,7 +260,7 @@ function matchesQuery(msg: MatchableMessage, query: string): boolean {
 }
 
 interface QueryTerm {
-  operator: string | null // null = plain text, otherwise from/to/cc/subject/is/has/label
+  operator: string | null // null = plain text, otherwise from/to/cc/subject/is/has
   value: string
   negated: boolean
 }
@@ -246,14 +268,37 @@ interface QueryTerm {
 function parseQueryTerms(query: string): QueryTerm[] {
   const terms: QueryTerm[] = []
   // Match: optional -, optional operator:, then either "quoted phrase" or non-space word
-  const regex = /(-?)(?:(from|to|cc|subject|is|has|label):)?(?:"([^"]*)"|([\S]+))/gi
+  const regex = /(-?)(?:(\w+):)?(?:"([^"]*)"|([\S]+))/gi
   let match: RegExpExecArray | null
 
   while ((match = regex.exec(query)) !== null) {
     const negated = match[1] === '-'
-    const operator = match[2]?.toLowerCase() ?? null
+    const rawOperator = match[2]?.toLowerCase() ?? null
     const value = (match[3] ?? match[4] ?? '').toLowerCase()
-    if (value) terms.push({ operator, value, negated })
+    if (!value) continue
+
+    // Skip OR keyword — it's a Gmail boolean operator, not a search term
+    if (!rawOperator && value === 'or') continue
+
+    // Warn once and skip server-only operators
+    if (rawOperator && SERVER_ONLY_OPERATORS.has(rawOperator)) {
+      if (!warnedOperators.has(rawOperator)) {
+        warnedOperators.add(rawOperator)
+        out.hint(`--query: "${rawOperator}:" is a server-only operator (use "mail search" instead), skipping`)
+      }
+      continue
+    }
+
+    // Warn once and skip completely unknown operators
+    if (rawOperator && !SUPPORTED_OPERATORS.has(rawOperator)) {
+      if (!warnedOperators.has(rawOperator)) {
+        warnedOperators.add(rawOperator)
+        out.hint(`--query: unknown operator "${rawOperator}:", skipping`)
+      }
+      continue
+    }
+
+    terms.push({ operator: rawOperator, value, negated })
   }
 
   return terms
@@ -287,11 +332,11 @@ function matchesTerm(msg: MatchableMessage, term: QueryTerm): boolean {
       else result = false
       break
     case 'has':
-      if (term.value === 'attachment') result = msg.attachments.length > 0
+      // In metadata format, payload.parts is absent so we can't inspect
+      // attachments directly. Use Content-Type heuristic: multipart/mixed
+      // almost always indicates attachments.
+      if (term.value === 'attachment') result = msg.mimeType.includes('multipart/mixed')
       else result = false
-      break
-    case 'label':
-      result = msg.labelIds.some((l) => l.toLowerCase() === term.value || l.toLowerCase().replace('/', '-') === term.value)
       break
     default: {
       // Plain text: match against subject + from
