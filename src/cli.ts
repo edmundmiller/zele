@@ -6,6 +6,7 @@
 
 import { goke } from 'goke'
 import { z } from 'zod'
+import React from 'react'
 import { registerAuthCommands } from './commands/auth-cmd.js'
 import { registerMailCommands } from './commands/mail.js'
 import { registerMailActionCommands } from './commands/mail-actions.js'
@@ -26,6 +27,18 @@ cli.option(
   '--account <account>',
   z.array(z.string()).describe('Filter by email account (repeatable)'),
 )
+
+// ---------------------------------------------------------------------------
+// Default command (TUI)
+// ---------------------------------------------------------------------------
+
+cli
+  .command('', 'Browse emails in TUI')
+  .action(async () => {
+    const { renderWithProviders } = await import('termcast')
+    const { default: Command } = await import('./mail-tui.js')
+    await renderWithProviders(React.createElement(Command))
+  })
 
 // ---------------------------------------------------------------------------
 // Register all command modules (auth first so login/logout/whoami appear at top of --help)

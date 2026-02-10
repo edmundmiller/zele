@@ -6,6 +6,7 @@
 import type { Goke } from 'goke'
 import { z } from 'zod'
 import fs from 'node:fs'
+import React from 'react'
 import { getClients, getClient } from '../auth.js'
 import type { ThreadListResult } from '../gmail-client.js'
 import { AuthError } from '../api-utils.js'
@@ -18,6 +19,18 @@ import pc from 'picocolors'
 // ---------------------------------------------------------------------------
 
 export function registerMailCommands(cli: Goke) {
+  // =========================================================================
+  // mail (TUI)
+  // =========================================================================
+
+  cli
+    .command('mail', 'Browse emails in TUI')
+    .action(async () => {
+      const { renderWithProviders } = await import('termcast')
+      const { default: Command } = await import('../mail-tui.js')
+      await renderWithProviders(React.createElement(Command))
+    })
+
   // =========================================================================
   // mail list
   // =========================================================================
