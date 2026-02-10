@@ -282,16 +282,6 @@ export function registerMailCommands(cli: Goke) {
     .option('--all', 'Reply all (include all original recipients)')
     .option('--from <from>', z.string().describe('Send-as alias email'))
     .action(async (threadId, options) => {
-      const { client } = await getClient(options.account)
-
-      const { parsed: thread } = await client.getThread({ threadId })
-      if (thread.messages.length === 0) {
-        out.error('No messages in thread')
-        process.exit(1)
-      }
-
-      const lastMsg = thread.messages[thread.messages.length - 1]!
-
       let body = options.body ?? ''
       if (options.bodyFile) {
         if (options.bodyFile === '-') {
@@ -310,49 +300,19 @@ export function registerMailCommands(cli: Goke) {
         process.exit(1)
       }
 
-      const replyTo = lastMsg.replyTo ?? lastMsg.from.email
-      const to = [{ email: replyTo }]
+      const { client } = await getClient(options.account)
 
-      let cc: Array<{ email: string }> | undefined
-      if (options.all) {
-        const profile = await client.getProfile()
-        const myEmail = profile.emailAddress.toLowerCase()
+      const cc = options.cc
+        ? options.cc.split(',').map((e: string) => ({ email: e.trim() })).filter((e: { email: string }) => e.email)
+        : undefined
 
-        const allRecipients = [
-          ...lastMsg.to.map((r) => r.email),
-          ...(lastMsg.cc?.map((r) => r.email) ?? []),
-        ]
-          .filter((e) => e.toLowerCase() !== myEmail)
-          .filter((e) => e.toLowerCase() !== replyTo.toLowerCase())
-
-        if (allRecipients.length > 0) {
-          cc = allRecipients.map((e) => ({ email: e }))
-        }
-      }
-
-      if (options.cc) {
-        const extra = options.cc
-          .split(',')
-          .map((e: string) => ({ email: e.trim() }))
-          .filter((e: { email: string }) => e.email)
-        cc = [...(cc ?? []), ...extra]
-      }
-
-      const refs = [lastMsg.references, lastMsg.messageId].filter(Boolean).join(' ')
-
-      const result = await client.sendMessage({
-        to,
-        subject: lastMsg.subject.startsWith('Re:') ? lastMsg.subject : `Re: ${lastMsg.subject}`,
-        body,
-        cc,
+      const result = await client.replyToThread({
         threadId,
-        inReplyTo: lastMsg.messageId,
-        references: refs || undefined,
+        body,
+        replyAll: options.all,
+        cc,
         fromEmail: options.from,
       })
-
-      // sendMessage already invalidates threadLists; also invalidate this specific thread
-      await client.invalidateThread(threadId)
 
       out.printYaml(result)
       out.success('Reply sent')
@@ -373,38 +333,17 @@ export function registerMailCommands(cli: Goke) {
         process.exit(1)
       }
 
-      const { client } = await getClient(options.account)
-
-      const { parsed: thread } = await client.getThread({ threadId })
-      if (thread.messages.length === 0) {
-        out.error('No messages in thread')
-        process.exit(1)
-      }
-
-      const lastMsg = thread.messages[thread.messages.length - 1]!
-      const forwardedBody = out.renderEmailBody(lastMsg.body, lastMsg.mimeType)
-
-      const fullBody = [
-        options.body ?? '',
-        '',
-        '---------- Forwarded message ----------',
-        `From: ${out.formatSender(lastMsg.from)}`,
-        `Date: ${lastMsg.date}`,
-        `Subject: ${lastMsg.subject}`,
-        `To: ${lastMsg.to.map((t) => t.email).join(', ')}`,
-        '',
-        forwardedBody,
-      ].join('\n')
-
       const recipients = options.to
         .split(',')
         .map((e: string) => ({ email: e.trim() }))
         .filter((e: { email: string }) => e.email)
 
-      const result = await client.sendMessage({
+      const { client } = await getClient(options.account)
+
+      const result = await client.forwardThread({
+        threadId,
         to: recipients,
-        subject: `Fwd: ${lastMsg.subject}`,
-        body: fullBody,
+        body: options.body,
         fromEmail: options.from,
       })
 

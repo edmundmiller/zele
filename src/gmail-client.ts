@@ -13,6 +13,7 @@ import type { OAuth2Client } from 'google-auth-library'
 import { createMimeMessage } from 'mimetext'
 import { parseFrom, parseAddressList } from './email-utils.js'
 import { withRetry, mapConcurrent } from './api-utils.js'
+import { renderEmailBody } from './output.js'
 import { getPrisma } from './db.js'
 import type { AccountId } from './auth.js'
 
@@ -93,6 +94,17 @@ export interface ThreadListResult {
 export interface ThreadResult {
   parsed: ThreadData
   raw: gmail_v1.Schema$Thread
+}
+
+// ---------------------------------------------------------------------------
+// Watch event type
+// ---------------------------------------------------------------------------
+
+export interface WatchEvent {
+  account: AccountId
+  type: 'new_message'
+  message: ParsedMessage
+  threadId: string
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +461,123 @@ export class GmailClient {
     await this.invalidateThreadLists()
 
     return res.data
+  }
+
+  // =========================================================================
+  // Reply / Forward (high-level composition)
+  // =========================================================================
+
+  /**
+   * Reply to a thread. Handles reply-to resolution, reply-all CC computation,
+   * References/In-Reply-To headers, and subject prefixing.
+   */
+  async replyToThread({
+    threadId,
+    body,
+    replyAll = false,
+    cc,
+    fromEmail,
+  }: {
+    threadId: string
+    body: string
+    replyAll?: boolean
+    cc?: Array<{ email: string }>
+    fromEmail?: string
+  }) {
+    const { parsed: thread } = await this.getThread({ threadId })
+    if (thread.messages.length === 0) {
+      throw new Error('No messages in thread')
+    }
+
+    const lastMsg = thread.messages[thread.messages.length - 1]!
+
+    const replyTo = lastMsg.replyTo ?? lastMsg.from.email
+    const to = [{ email: replyTo }]
+
+    let resolvedCc: Array<{ email: string }> | undefined
+    if (replyAll) {
+      const profile = await this.getProfile()
+      const myEmail = profile.emailAddress.toLowerCase()
+
+      const allRecipients = [
+        ...lastMsg.to.map((r) => r.email),
+        ...(lastMsg.cc?.map((r) => r.email) ?? []),
+      ]
+        .filter((e) => e.toLowerCase() !== myEmail)
+        .filter((e) => e.toLowerCase() !== replyTo.toLowerCase())
+
+      if (allRecipients.length > 0) {
+        resolvedCc = allRecipients.map((e) => ({ email: e }))
+      }
+    }
+
+    if (cc) {
+      resolvedCc = [...(resolvedCc ?? []), ...cc]
+    }
+
+    const refs = [lastMsg.references, lastMsg.messageId].filter(Boolean).join(' ')
+
+    const result = await this.sendMessage({
+      to,
+      subject: lastMsg.subject.startsWith('Re:') ? lastMsg.subject : `Re: ${lastMsg.subject}`,
+      body,
+      cc: resolvedCc,
+      threadId,
+      inReplyTo: lastMsg.messageId,
+      references: refs || undefined,
+      fromEmail,
+    })
+
+    await this.invalidateThread(threadId)
+
+    return result
+  }
+
+  /**
+   * Forward a thread. Fetches the last message, renders its body,
+   * builds the "Forwarded message" block, and sends.
+   */
+  async forwardThread({
+    threadId,
+    to,
+    body,
+    fromEmail,
+  }: {
+    threadId: string
+    to: Array<{ email: string }>
+    body?: string
+    fromEmail?: string
+  }) {
+    const { parsed: thread } = await this.getThread({ threadId })
+    if (thread.messages.length === 0) {
+      throw new Error('No messages in thread')
+    }
+
+    const lastMsg = thread.messages[thread.messages.length - 1]!
+    const renderedBody = renderEmailBody(lastMsg.body, lastMsg.mimeType)
+
+    const fromStr = lastMsg.from.name && lastMsg.from.name !== lastMsg.from.email
+      ? `${lastMsg.from.name} <${lastMsg.from.email}>`
+      : lastMsg.from.email
+
+    const fullBody = [
+      body ?? '',
+      '',
+      '---------- Forwarded message ----------',
+      `From: ${fromStr}`,
+      `Date: ${lastMsg.date}`,
+      `Subject: ${lastMsg.subject}`,
+      `To: ${lastMsg.to.map((t) => t.email).join(', ')}`,
+      '',
+      renderedBody,
+    ].join('\n')
+
+    return this.sendMessage({
+      to,
+      subject: `Fwd: ${lastMsg.subject}`,
+      body: fullBody,
+      fromEmail,
+    })
   }
 
   // =========================================================================
@@ -1206,6 +1335,124 @@ export class GmailClient {
   }
 
   // =========================================================================
+  // Watch: async generator for inbox polling via History API
+  // =========================================================================
+
+  /**
+   * Poll for new messages using the Gmail History API.
+   * Yields WatchEvent objects as new messages arrive.
+   * Handles history seeding, expiry re-seeding, and client-side query filtering.
+   * Persists historyId in the DB so it survives across CLI invocations.
+   */
+  async *watchInbox({
+    folder = 'inbox',
+    intervalMs = 15_000,
+    query,
+    once = false,
+  }: {
+    folder?: string
+    intervalMs?: number
+    query?: string
+    once?: boolean
+  } = {}): AsyncGenerator<WatchEvent> {
+    if (!this.account) throw new Error('watchInbox requires an authenticated account')
+
+    const filterLabelId = WATCH_FOLDER_LABELS[folder]
+    if (!filterLabelId) {
+      throw new Error(`Unsupported folder for watch: "${folder}". Supported: ${Object.keys(WATCH_FOLDER_LABELS).join(', ')}`)
+    }
+
+    // Seed historyId
+    let historyId = await getLastHistoryId(this.account)
+    if (!historyId) {
+      const profile = await this.getProfile()
+      historyId = profile.historyId
+      await setLastHistoryId(this.account, historyId)
+    }
+
+    while (true) {
+      try {
+        yield* this.pollOnce(historyId, filterLabelId, query, (newId) => { historyId = newId })
+      } catch (err: any) {
+        if (isHistoryExpired(err)) {
+          // historyId expired — Google only keeps ~7 days. Re-seed.
+          const profile = await this.getProfile()
+          historyId = profile.historyId
+          await setLastHistoryId(this.account, historyId)
+          // Retry once after reseed
+          yield* this.pollOnce(historyId, filterLabelId, query, (newId) => { historyId = newId })
+        } else {
+          throw err
+        }
+      }
+
+      if (once) return
+      await new Promise((resolve) => setTimeout(resolve, intervalMs))
+    }
+  }
+
+  /** Single poll tick — yields WatchEvents for new messages. */
+  private async *pollOnce(
+    historyId: string,
+    filterLabelId: string,
+    query: string | undefined,
+    updateHistoryId: (newId: string) => void,
+  ): AsyncGenerator<WatchEvent> {
+    const { history, historyId: newHistoryId } = await this.listHistory({
+      startHistoryId: historyId,
+      labelId: filterLabelId,
+      historyTypes: ['messageAdded'],
+    })
+
+    if (newHistoryId !== historyId) {
+      updateHistoryId(newHistoryId)
+      await setLastHistoryId(this.account!, newHistoryId)
+    }
+
+    if (history.length === 0) return
+
+    // Collect unique message IDs from messageAdded events
+    const seenIds = new Set<string>()
+    const messageIds: string[] = []
+
+    for (const entry of history) {
+      for (const added of entry.messagesAdded ?? []) {
+        const id = added.message?.id
+        if (id && !seenIds.has(id)) {
+          seenIds.add(id)
+          messageIds.push(id)
+        }
+      }
+    }
+
+    if (messageIds.length === 0) return
+
+    // Hydrate messages with metadata (bounded concurrency)
+    const hydrated = await mapConcurrent(messageIds, async (msgId) => {
+      try {
+        const msg = await this.getMessage({ messageId: msgId, format: 'metadata' })
+        if ('raw' in msg) return null
+        if (query && !matchesQuery(msg, query)) return null
+        return msg
+      } catch (err: any) {
+        const status = err?.code ?? err?.status ?? err?.response?.status
+        if (status === 404) return null // message deleted between history fetch and hydration
+        return null
+      }
+    })
+
+    for (const msg of hydrated) {
+      if (!msg) continue
+      yield {
+        account: this.account!,
+        type: 'new_message',
+        message: msg,
+        threadId: msg.threadId,
+      }
+    }
+  }
+
+  // =========================================================================
   // Private: message parsing (delegates to static methods)
   // =========================================================================
 
@@ -1479,4 +1726,170 @@ export class GmailClient {
         .filter(Boolean),
     )
   }
+}
+
+// ---------------------------------------------------------------------------
+// Watch: folder label mapping
+// ---------------------------------------------------------------------------
+
+const WATCH_FOLDER_LABELS: Record<string, string> = {
+  inbox: 'INBOX',
+  sent: 'SENT',
+  trash: 'TRASH',
+  spam: 'SPAM',
+  starred: 'STARRED',
+  drafts: 'DRAFT',
+}
+
+// ---------------------------------------------------------------------------
+// Watch: sync state persistence (historyId in DB)
+// ---------------------------------------------------------------------------
+
+async function getLastHistoryId(account: AccountId): Promise<string | undefined> {
+  const prisma = await getPrisma()
+  const row = await prisma.syncState.findUnique({
+    where: { email_appId_key: { email: account.email, appId: account.appId, key: 'history_id' } },
+  })
+  return row?.value
+}
+
+async function setLastHistoryId(account: AccountId, historyId: string): Promise<void> {
+  const prisma = await getPrisma()
+  await prisma.syncState.upsert({
+    where: { email_appId_key: { email: account.email, appId: account.appId, key: 'history_id' } },
+    create: { email: account.email, appId: account.appId, key: 'history_id', value: historyId },
+    update: { value: historyId },
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Watch: history expiry detection
+// ---------------------------------------------------------------------------
+
+function isHistoryExpired(err: any): boolean {
+  const status = err?.code ?? err?.status ?? err?.response?.status
+  if (status === 404) return true
+  if (status === 400) {
+    const message = err?.message ?? err?.response?.data?.error?.message ?? ''
+    if (message.includes('historyId')) return true
+  }
+  return false
+}
+
+// ---------------------------------------------------------------------------
+// Watch: client-side Gmail query matching
+// ---------------------------------------------------------------------------
+// The History API doesn't support server-side query filtering, so we parse
+// common Gmail search operators and match against message metadata.
+//
+// Supported operators: from:, to:, cc:, subject:, is:unread/read/starred,
+// has:attachment, and plain text (matches subject + from).
+// Multiple terms are AND-ed together. Quoted phrases and negation supported.
+//
+// Limitations vs full Gmail search:
+// - label: not supported (labelIds are API IDs like Label_123, not names)
+// - has:attachment uses Content-Type heuristic (metadata format lacks parts)
+// - OR, {}, newer_than:, older_than:, etc. are server-only — warned & skipped
+//
+// See https://support.google.com/mail/answer/7190 for the full Gmail spec.
+// ---------------------------------------------------------------------------
+
+const SERVER_ONLY_OPERATORS = new Set([
+  'in', 'label', 'after', 'before', 'newer_than', 'older_than',
+  'filename', 'size', 'larger', 'smaller', 'deliveredto', 'rfc822msgid',
+  'list', 'category',
+])
+
+const SUPPORTED_OPERATORS = new Set([
+  'from', 'to', 'cc', 'subject', 'is', 'has',
+])
+
+interface QueryTerm {
+  operator: string | null
+  value: string
+  negated: boolean
+}
+
+const warnedOperators = new Set<string>()
+
+function matchesQuery(msg: ParsedMessage, query: string): boolean {
+  const terms = parseQueryTerms(query)
+  return terms.every((term) => matchesTerm(msg, term))
+}
+
+function parseQueryTerms(query: string): QueryTerm[] {
+  const terms: QueryTerm[] = []
+  const regex = /(-?)(?:(\w+):)?(?:"([^"]*)"|([\S]+))/gi
+  let match: RegExpExecArray | null
+
+  while ((match = regex.exec(query)) !== null) {
+    const negated = match[1] === '-'
+    const rawOperator = match[2]?.toLowerCase() ?? null
+    const value = (match[3] ?? match[4] ?? '').toLowerCase()
+    if (!value) continue
+
+    if (!rawOperator && value === 'or') continue
+
+    if (rawOperator && SERVER_ONLY_OPERATORS.has(rawOperator)) {
+      if (!warnedOperators.has(rawOperator)) {
+        warnedOperators.add(rawOperator)
+        process.stderr.write(`# --query: "${rawOperator}:" is a server-only operator (use "mail search" instead), skipping\n`)
+      }
+      continue
+    }
+
+    if (rawOperator && !SUPPORTED_OPERATORS.has(rawOperator)) {
+      if (!warnedOperators.has(rawOperator)) {
+        warnedOperators.add(rawOperator)
+        process.stderr.write(`# --query: unknown operator "${rawOperator}:", skipping\n`)
+      }
+      continue
+    }
+
+    terms.push({ operator: rawOperator, value, negated })
+  }
+
+  return terms
+}
+
+function senderMatches(sender: { name?: string; email: string }, value: string): boolean {
+  const full = `${sender.name ?? ''} ${sender.email}`.toLowerCase()
+  return full.includes(value)
+}
+
+function matchesTerm(msg: ParsedMessage, term: QueryTerm): boolean {
+  let result: boolean
+
+  switch (term.operator) {
+    case 'from':
+      result = senderMatches(msg.from, term.value)
+      break
+    case 'to':
+      result = msg.to.some((r) => senderMatches(r, term.value))
+      break
+    case 'cc':
+      result = (msg.cc ?? []).some((r) => senderMatches(r, term.value))
+      break
+    case 'subject':
+      result = msg.subject.toLowerCase().includes(term.value)
+      break
+    case 'is':
+      if (term.value === 'unread') result = msg.unread
+      else if (term.value === 'read') result = !msg.unread
+      else if (term.value === 'starred') result = msg.starred
+      else result = false
+      break
+    case 'has':
+      if (term.value === 'attachment') result = msg.mimeType.includes('multipart/mixed')
+      else result = false
+      break
+    default: {
+      const subject = msg.subject.toLowerCase()
+      const from = `${msg.from.name ?? ''} ${msg.from.email}`.toLowerCase()
+      result = subject.includes(term.value) || from.includes(term.value)
+      break
+    }
+  }
+
+  return term.negated ? !result : result
 }
