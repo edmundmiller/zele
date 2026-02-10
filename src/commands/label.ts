@@ -24,15 +24,16 @@ export function registerLabelCommands(cli: Goke) {
 
       // Fetch from all accounts concurrently, tolerating individual failures
       const settled = await Promise.allSettled(
-        clients.map(async ({ email, client }) => {
+        clients.map(async ({ email, appId, client }) => {
+          const account = { email, appId }
           if (!options.noCache) {
-            const cached = await cache.getCachedLabels<LabelList>(email)
+            const cached = await cache.getCachedLabels<LabelList>(account)
             if (cached) return { email, labels: cached }
           }
 
           const labels = await client.listLabels()
           if (!options.noCache) {
-            await cache.cacheLabels(email, labels)
+            await cache.cacheLabels(account, labels)
           }
 
           return { email, labels }
@@ -109,7 +110,8 @@ export function registerLabelCommands(cli: Goke) {
     .option('--bg-color <bgColor>', z.string().describe('Background color (hex, e.g. #4986e7)'))
     .option('--text-color <textColor>', z.string().describe('Text color (hex, e.g. #ffffff)'))
     .action(async (name, options) => {
-      const { email, client } = await getClient(options.account)
+      const { email, appId, client } = await getClient(options.account)
+      const account = { email, appId }
 
       const result = await client.createLabel({
         name,
@@ -118,7 +120,7 @@ export function registerLabelCommands(cli: Goke) {
           : undefined,
       })
 
-      await cache.invalidateLabels(email)
+      await cache.invalidateLabels(account)
 
       out.printYaml(result)
       out.success(`Label created: "${result.name}"`)
@@ -146,12 +148,13 @@ export function registerLabelCommands(cli: Goke) {
         }
       }
 
-      const { email, client } = await getClient(options.account)
+      const { email, appId, client } = await getClient(options.account)
+      const account = { email, appId }
 
       await client.deleteLabel({ labelId })
 
-      await cache.invalidateLabels(email)
-      await cache.invalidateLabelCounts(email)
+      await cache.invalidateLabels(account)
+      await cache.invalidateLabelCounts(account)
 
       out.printYaml({ label_id: labelId, deleted: true })
     })
@@ -170,15 +173,16 @@ export function registerLabelCommands(cli: Goke) {
 
       // Fetch from all accounts concurrently, tolerating individual failures
       const settled = await Promise.allSettled(
-        clients.map(async ({ email, client }) => {
+        clients.map(async ({ email, appId, client }) => {
+          const account = { email, appId }
           if (!options.noCache) {
-            const cached = await cache.getCachedLabelCounts<CountList>(email)
+            const cached = await cache.getCachedLabelCounts<CountList>(account)
             if (cached) return { email, counts: cached }
           }
 
           const counts = await client.getLabelCounts()
           if (!options.noCache) {
-            await cache.cacheLabelCounts(email, counts)
+            await cache.cacheLabelCounts(account, counts)
           }
 
           return { email, counts }

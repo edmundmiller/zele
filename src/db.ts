@@ -1,7 +1,7 @@
 // Prisma singleton for zele.
-// Manages a single SQLite database at ~/.zele/zele.db for all state:
+// Manages a single SQLite database at ~/.zele/sqlite.db for all state:
 // accounts (OAuth tokens), cache (threads, labels, profiles), and sync state.
-// Runs idempotent schema migration on every startup using src/schema.sql.
+// Runs idempotent schema setup on every startup using src/schema.sql.
 
 import fs from 'node:fs'
 import path from 'node:path'
@@ -16,7 +16,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
 const ZELE_DIR = path.join(os.homedir(), '.zele')
-const DB_PATH = path.join(ZELE_DIR, 'zele.db')
+const DB_PATH = path.join(ZELE_DIR, 'sqlite.db')
 
 let prismaInstance: PrismaClient | null = null
 let initPromise: Promise<PrismaClient> | null = null
@@ -44,14 +44,14 @@ async function initializePrisma(): Promise<PrismaClient> {
   const adapter = new PrismaLibSql({ url: `file:${DB_PATH}` })
   const prisma = new PrismaClient({ adapter })
 
-  // Always run migrations — schema.sql uses IF NOT EXISTS so it's idempotent
-  await migrateSchema(prisma)
+  // Run schema.sql — uses CREATE TABLE IF NOT EXISTS so it's idempotent
+  await applySchema(prisma)
 
   prismaInstance = prisma
   return prisma
 }
 
-async function migrateSchema(prisma: PrismaClient): Promise<void> {
+async function applySchema(prisma: PrismaClient): Promise<void> {
   // When running from source (tsx), __dirname is src/
   // When running from dist, __dirname is dist/ and schema.sql is at ../src/schema.sql
   let schemaPath = path.join(__dirname, 'schema.sql')
@@ -73,16 +73,6 @@ async function migrateSchema(prisma: PrismaClient): Promise<void> {
     // Make CREATE INDEX idempotent
     .map((s) => s.replace(/^CREATE\s+UNIQUE\s+INDEX\b(?!\s+IF)/i, 'CREATE UNIQUE INDEX IF NOT EXISTS')
                  .replace(/^CREATE\s+INDEX\b(?!\s+IF)/i, 'CREATE INDEX IF NOT EXISTS'))
-
-  // Compatibility migration: older DBs may not have account_status yet.
-  try {
-    await prisma.$executeRawUnsafe(
-      "ALTER TABLE \"accounts\" ADD COLUMN \"account_status\" TEXT NOT NULL DEFAULT 'active'",
-    )
-  } catch {
-    // Column already exists.
-  }
-
 
   for (const statement of statements) {
     await prisma.$executeRawUnsafe(statement)

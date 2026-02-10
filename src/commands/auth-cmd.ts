@@ -25,21 +25,23 @@ export function registerAuthCommands(cli: Goke) {
         return
       }
 
+      const emails = [...new Set(accounts.map((a) => a.email))]
+
       // If no email specified and multiple accounts: error with list
-      if (!email && accounts.length > 1) {
+      if (!email && emails.length > 1) {
         out.error('Multiple accounts logged in. Specify which to remove:')
-        for (const a of accounts) {
-          process.stderr.write(`  ${a}\n`)
+        for (const e of emails) {
+          process.stderr.write(`  ${e}\n`)
         }
         process.exit(1)
       }
 
       // If no email and only one account, use that one
-      const targetEmail = email ?? accounts[0]!
+      const targetEmail = email ?? emails[0]!
 
-      if (!accounts.includes(targetEmail)) {
+      if (!emails.includes(targetEmail)) {
         out.error(`Account not found: ${targetEmail}`)
-        out.hint(`Logged in accounts: ${accounts.join(', ')}`)
+        out.hint(`Logged in accounts: ${emails.join(', ')}`)
         process.exit(1)
       }
 
@@ -79,6 +81,7 @@ export function registerAuthCommands(cli: Goke) {
       out.printList(
         statuses.map((s) => ({
           email: s.email,
+          app_id: s.appId,
           status: 'Authenticated',
           expires: s.expiresAt?.toISOString() ?? 'unknown',
         })),

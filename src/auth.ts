@@ -1,8 +1,10 @@
 // OAuth2 authentication module for zele.
 // Multi-account support: tokens are stored in the Prisma-managed SQLite DB
-// (accounts table) keyed by email. Supports login (browser OAuth), per-account
-// token refresh, and helpers to get authenticated GmailClient instances for
-// one or all accounts.
+// (accounts table) keyed by (email, app_id). Supports login (browser OAuth),
+// per-account token refresh, and helpers to get authenticated GmailClient
+// instances for one or all accounts.
+// app_id is the Google OAuth client ID used during login, enabling future
+// support for multiple OAuth apps per email.
 // Migration: on first use, if legacy ~/.zele/tokens.json exists, it is
 // imported into the DB and renamed to tokens.json.bak.
 
@@ -33,7 +35,7 @@ const LEGACY_TOKENS_FILE = path.join(ZELE_DIR, 'tokens.json')
 // which Google restricts — Gmail scopes are blocked from device code entirely).
 // Source: public open-source repos, tested 2026-02-09.
 // ---------------------------------------------------------------------------
-const OAUTH_CLIENTS = {
+const OAUTH_CLIENTS: Record<string, { clientId: string; clientSecret: string }> = {
   // Mozilla Thunderbird — largest user base, highest Google quota.
   // Source: searchfox.org/comm-central/source/mailnews/base/src/OAuth2Providers.sys.mjs
   thunderbird: {
@@ -52,12 +54,15 @@ const OAUTH_CLIENTS = {
     clientId: '317066460457-pkpkedrvt2ldq6g2hj1egfka2n7vpuoo.apps.googleusercontent.com',
     clientSecret: 'Y8eFAaWfcanV3amZdDvtbYUq',
   },
-} as const
+}
 
-const ACTIVE_CLIENT = OAUTH_CLIENTS.thunderbird
+const ACTIVE_CLIENT = OAUTH_CLIENTS.thunderbird!
+
+/** Default app_id for accounts — the Thunderbird OAuth client ID. */
+export const DEFAULT_APP_ID = ACTIVE_CLIENT.clientId
 
 const CLIENT_ID =
-  process.env.ZELE_CLIENT_ID ?? ACTIVE_CLIENT.clientId
+  process.env.ZELE_CLIENT_ID ?? DEFAULT_APP_ID
 
 const CLIENT_SECRET =
   process.env.ZELE_CLIENT_SECRET ?? ACTIVE_CLIENT.clientSecret
@@ -73,12 +78,44 @@ const SCOPES = [
 // OAuth2 client factory
 // ---------------------------------------------------------------------------
 
-export function createOAuth2Client(): OAuth2Client {
+/**
+ * Create an OAuth2Client. If appId is provided, looks up the matching
+ * client credentials from OAUTH_CLIENTS by client ID. Falls back to
+ * the active client / env vars.
+ */
+export function createOAuth2Client(appId?: string): OAuth2Client {
+  let clientId = CLIENT_ID
+  let clientSecret = CLIENT_SECRET
+
+  if (appId) {
+    // Look up by client ID value in OAUTH_CLIENTS
+    const entry = Object.values(OAUTH_CLIENTS).find((c) => c.clientId === appId)
+    if (entry) {
+      clientId = entry.clientId
+      clientSecret = entry.clientSecret
+    } else {
+      // Unknown app ID — use it directly (custom client scenario).
+      // The caller must have set ZELE_CLIENT_SECRET or the token must
+      // already have a refresh_token that works without the secret.
+      clientId = appId
+    }
+  }
+
   return new OAuth2Client({
-    clientId: CLIENT_ID,
-    clientSecret: CLIENT_SECRET,
+    clientId,
+    clientSecret,
     redirectUri: `http://localhost:${REDIRECT_PORT}`,
   })
+}
+
+// ---------------------------------------------------------------------------
+// Account identifier — used throughout the codebase to scope data
+// to a specific (email, app_id) pair.
+// ---------------------------------------------------------------------------
+
+export interface AccountId {
+  email: string
+  appId: string
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +154,7 @@ async function migrateLegacyTokens(): Promise<void> {
     await prisma.accounts.create({
       data: {
         email,
+        app_id: CLIENT_ID,
         tokens: JSON.stringify(tokens),
         updated_at: new Date(),
       },
@@ -238,9 +276,9 @@ async function getAuthCodeFromBrowser(oauth2Client: OAuth2Client): Promise<strin
 
 /**
  * Run the full browser OAuth flow and save the account to the DB.
- * Returns the email and an authenticated GmailClient.
+ * Returns the account identifier and an authenticated GmailClient.
  */
-export async function login(): Promise<{ email: string; client: GmailClient }> {
+export async function login(): Promise<{ email: string; appId: string; client: GmailClient }> {
   const oauth2Client = createOAuth2Client()
 
   const code = await getAuthCodeFromBrowser(oauth2Client)
@@ -257,12 +295,12 @@ export async function login(): Promise<{ email: string; client: GmailClient }> {
   // Upsert account in DB
   const prisma = await getPrisma()
   await prisma.accounts.upsert({
-    where: { email },
-    create: { email, tokens: JSON.stringify(tokens), updated_at: new Date() },
+    where: { email_app_id: { email, app_id: CLIENT_ID } },
+    create: { email, app_id: CLIENT_ID, tokens: JSON.stringify(tokens), updated_at: new Date() },
     update: { tokens: JSON.stringify(tokens), updated_at: new Date() },
   })
 
-  return { email, client }
+  return { email, appId: CLIENT_ID, client }
 }
 
 // ---------------------------------------------------------------------------
@@ -271,18 +309,19 @@ export async function login(): Promise<{ email: string; client: GmailClient }> {
 
 export async function logout(email: string): Promise<void> {
   const prisma = await getPrisma()
-  await prisma.accounts.delete({ where: { email } })
+  // Delete all app_id entries for this email (logout removes all credentials for the email)
+  await prisma.accounts.deleteMany({ where: { email } })
 }
 
 // ---------------------------------------------------------------------------
 // Account listing
 // ---------------------------------------------------------------------------
 
-export async function listAccounts(): Promise<string[]> {
+export async function listAccounts(): Promise<AccountId[]> {
   await migrateLegacyTokens()
   const prisma = await getPrisma()
-  const rows = await prisma.accounts.findMany({ select: { email: true } })
-  return rows.map((r) => r.email)
+  const rows = await prisma.accounts.findMany({ select: { email: true, app_id: true } })
+  return rows.map((r) => ({ email: r.email, appId: r.app_id }))
 }
 
 // ---------------------------------------------------------------------------
@@ -292,27 +331,30 @@ export async function listAccounts(): Promise<string[]> {
 /**
  * Create an authenticated OAuth2Client for a known account.
  * Loads tokens from DB, refreshes if expired, saves refreshed tokens back.
+ * Uses the stored app_id to create the OAuth2 client with the correct credentials.
  */
-async function authenticateAccount(email: string): Promise<OAuth2Client> {
+async function authenticateAccount(account: AccountId): Promise<OAuth2Client> {
   const prisma = await getPrisma()
-  const row = await prisma.accounts.findUnique({ where: { email } })
+  const row = await prisma.accounts.findUnique({
+    where: { email_app_id: { email: account.email, app_id: account.appId } },
+  })
   if (!row) {
-    throw new Error(`No account found for ${email}. Run: zele login`)
+    throw new Error(`No account found for ${account.email}. Run: zele login`)
   }
 
   const tokens: Credentials = JSON.parse(row.tokens)
-  const oauth2Client = createOAuth2Client()
+  const oauth2Client = createOAuth2Client(account.appId)
   oauth2Client.setCredentials(tokens)
 
   // Refresh if expired — merge to preserve refresh_token which Google
   // often omits from refresh responses
   if (tokens.expiry_date && tokens.expiry_date < Date.now()) {
-    process.stderr.write(pc.dim(`Token expired for ${email}, refreshing...`) + '\n')
+    process.stderr.write(pc.dim(`Token expired for ${account.email}, refreshing...`) + '\n')
     const { credentials } = await oauth2Client.refreshAccessToken()
     const merged = { ...tokens, ...credentials }
     oauth2Client.setCredentials(merged)
     await prisma.accounts.update({
-      where: { email },
+      where: { email_app_id: { email: account.email, app_id: account.appId } },
       data: { tokens: JSON.stringify(merged), updated_at: new Date() },
     })
   }
@@ -326,27 +368,27 @@ async function authenticateAccount(email: string): Promise<OAuth2Client> {
  */
 export async function getClients(
   accounts?: string[],
-): Promise<Array<{ email: string; client: GmailClient }>> {
+): Promise<Array<{ email: string; appId: string; client: GmailClient }>> {
   await migrateLegacyTokens()
 
-  const allEmails = await listAccounts()
-  if (allEmails.length === 0) {
+  const allAccounts = await listAccounts()
+  if (allAccounts.length === 0) {
     throw new Error('No accounts registered. Run: zele login')
   }
 
-  const emails = accounts && accounts.length > 0
-    ? allEmails.filter((e) => accounts.includes(e))
-    : allEmails
+  const filtered = accounts && accounts.length > 0
+    ? allAccounts.filter((a) => accounts.includes(a.email))
+    : allAccounts
 
-  if (emails.length === 0) {
-    const available = allEmails.join(', ')
+  if (filtered.length === 0) {
+    const available = allAccounts.map((a) => a.email).join(', ')
     throw new Error(`No matching accounts. Available: ${available}`)
   }
 
   const results = await Promise.all(
-    emails.map(async (email) => {
-      const auth = await authenticateAccount(email)
-      return { email, client: new GmailClient({ auth }) }
+    filtered.map(async (account) => {
+      const auth = await authenticateAccount(account)
+      return { email: account.email, appId: account.appId, client: new GmailClient({ auth }) }
     }),
   )
 
@@ -359,7 +401,7 @@ export async function getClients(
  */
 export async function getClient(
   accounts?: string[],
-): Promise<{ email: string; client: GmailClient }> {
+): Promise<{ email: string; appId: string; client: GmailClient }> {
   const clients = await getClients(accounts)
   if (clients.length === 1) {
     return clients[0]!
@@ -380,29 +422,29 @@ export async function getClient(
  */
 export async function getCalendarClients(
   accounts?: string[],
-): Promise<Array<{ email: string; client: CalendarClient }>> {
+): Promise<Array<{ email: string; appId: string; client: CalendarClient }>> {
   await migrateLegacyTokens()
 
-  const allEmails = await listAccounts()
-  if (allEmails.length === 0) {
+  const allAccounts = await listAccounts()
+  if (allAccounts.length === 0) {
     throw new Error('No accounts registered. Run: zele login')
   }
 
-  const emails = accounts && accounts.length > 0
-    ? allEmails.filter((e) => accounts.includes(e))
-    : allEmails
+  const filtered = accounts && accounts.length > 0
+    ? allAccounts.filter((a) => accounts.includes(a.email))
+    : allAccounts
 
-  if (emails.length === 0) {
-    const available = allEmails.join(', ')
+  if (filtered.length === 0) {
+    const available = allAccounts.map((a) => a.email).join(', ')
     throw new Error(`No matching accounts. Available: ${available}`)
   }
 
   const results = await Promise.all(
-    emails.map(async (email) => {
-      const auth = await authenticateAccount(email)
+    filtered.map(async (account) => {
+      const auth = await authenticateAccount(account)
       const { token } = await auth.getAccessToken()
-      if (!token) throw new Error(`Failed to get access token for ${email}`)
-      return { email, client: new CalendarClient({ accessToken: token, email }) }
+      if (!token) throw new Error(`Failed to get access token for ${account.email}`)
+      return { email: account.email, appId: account.appId, client: new CalendarClient({ accessToken: token, email: account.email }) }
     }),
   )
 
@@ -415,7 +457,7 @@ export async function getCalendarClients(
  */
 export async function getCalendarClient(
   accounts?: string[],
-): Promise<{ email: string; client: CalendarClient }> {
+): Promise<{ email: string; appId: string; client: CalendarClient }> {
   const clients = await getCalendarClients(accounts)
   if (clients.length === 1) {
     return clients[0]!
@@ -433,6 +475,7 @@ export async function getCalendarClient(
 
 export interface AuthStatus {
   email: string
+  appId: string
   expiresAt?: Date
 }
 
@@ -445,6 +488,7 @@ export async function getAuthStatuses(): Promise<AuthStatus[]> {
     const tokens: Credentials = JSON.parse(row.tokens)
     return {
       email: row.email,
+      appId: row.app_id,
       expiresAt: tokens.expiry_date ? new Date(tokens.expiry_date) : undefined,
     }
   })

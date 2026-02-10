@@ -6,7 +6,7 @@
 
 import type { Goke } from 'goke'
 import { z } from 'zod'
-import { getClients } from '../auth.js'
+import { getClients, type AccountId } from '../auth.js'
 import type { GmailClient } from '../gmail-client.js'
 import { mapConcurrent } from '../api-utils.js'
 import * as cache from '../gmail-cache.js'
@@ -55,19 +55,20 @@ export function registerWatchCommands(cli: Goke) {
 
       // Seed historyId for each account
       const states = await Promise.all(
-        clients.map(async ({ email, client }) => {
-          let historyId = await cache.getLastHistoryId(email)
+        clients.map(async ({ email, appId, client }) => {
+          const account: AccountId = { email, appId }
+          let historyId = await cache.getLastHistoryId(account)
 
           if (!historyId) {
             const profile = await client.getProfile()
             historyId = profile.historyId
-            await cache.setLastHistoryId(email, historyId)
+            await cache.setLastHistoryId(account, historyId)
             out.hint(`${email}: watching from now (historyId ${historyId})`)
           } else {
             out.hint(`${email}: resuming from historyId ${historyId}`)
           }
 
-          return { email, client, historyId }
+          return { account, client, historyId }
         }),
       )
 
@@ -90,10 +91,10 @@ export function registerWatchCommands(cli: Goke) {
             } catch (err: any) {
               // historyId expired — Google only keeps ~7 days
               if (isHistoryExpired(err)) {
-                out.hint(`${state.email}: history expired, re-seeding...`)
+                out.hint(`${state.account.email}: history expired, re-seeding...`)
                 const profile = await state.client.getProfile()
                 state.historyId = profile.historyId
-                await cache.setLastHistoryId(state.email, state.historyId)
+                await cache.setLastHistoryId(state.account, state.historyId)
                 // Retry once after reseed (important for --once mode)
                 return await pollAccount(state, filterLabelId, options.query)
               }
@@ -127,7 +128,7 @@ export function registerWatchCommands(cli: Goke) {
 // ---------------------------------------------------------------------------
 
 async function pollAccount(
-  state: { email: string; client: GmailClient; historyId: string },
+  state: { account: AccountId; client: GmailClient; historyId: string },
   filterLabelId: string,
   query: string | undefined,
 ): Promise<Array<Record<string, unknown>>> {
@@ -140,7 +141,7 @@ async function pollAccount(
   // Update stored historyId even if no changes
   if (newHistoryId !== state.historyId) {
     state.historyId = newHistoryId
-    await cache.setLastHistoryId(state.email, newHistoryId)
+    await cache.setLastHistoryId(state.account, newHistoryId)
   }
 
   if (history.length === 0) return []
@@ -175,7 +176,7 @@ async function pollAccount(
       if (query && !matchesQuery(msg, query)) return null
 
       return {
-        account: state.email,
+        account: state.account.email,
         type: 'new_message',
         from: out.formatSender(msg.from),
         subject: msg.subject,

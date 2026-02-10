@@ -15,7 +15,7 @@ import * as out from '../output.js'
 async function bulkAction(
   threadIds: string[],
   actionName: string,
-  account: string[] | undefined,
+  accountFilter: string[] | undefined,
   fn: (client: GmailClient, ids: string[]) => Promise<void>,
 ) {
   if (threadIds.length === 0) {
@@ -23,14 +23,15 @@ async function bulkAction(
     process.exit(1)
   }
 
-  const { email, client } = await getClient(account)
+  const { email, appId, client } = await getClient(accountFilter)
+  const account = { email, appId }
 
   await fn(client, threadIds)
 
   // Invalidate caches
-  await cache.invalidateThreads(email, threadIds)
-  await cache.invalidateThreadLists(email)
-  await cache.invalidateLabelCounts(email)
+  await cache.invalidateThreads(account, threadIds)
+  await cache.invalidateThreadLists(account)
+  await cache.invalidateLabelCounts(account)
 
   out.printYaml({ action: actionName, thread_ids: threadIds, success: true })
 }
@@ -106,12 +107,13 @@ export function registerMailActionCommands(cli: Goke) {
   cli
     .command('mail trash-spam', 'Trash all spam threads')
     .action(async (options) => {
-      const { email, client } = await getClient(options.account)
+      const { email, appId, client } = await getClient(options.account)
+      const account = { email, appId }
 
       const result = await client.trashAllSpam()
 
-      await cache.invalidateThreadLists(email)
-      await cache.invalidateLabelCounts(email)
+      await cache.invalidateThreadLists(account)
+      await cache.invalidateLabelCounts(account)
 
       out.printYaml(result)
       out.success(`Trashed ${result.count} spam thread(s)`)

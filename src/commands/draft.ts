@@ -167,11 +167,12 @@ export function registerDraftCommands(cli: Goke) {
   cli
     .command('draft send <draftId>', 'Send a draft')
     .action(async (draftId, options) => {
-      const { email, client } = await getClient(options.account)
+      const { email, appId, client } = await getClient(options.account)
+      const account = { email, appId }
 
       const result = await client.sendDraft({ draftId })
 
-      await cache.invalidateThreadLists(email)
+      await cache.invalidateThreadLists(account)
 
       out.printYaml(result)
       out.success('Draft sent')

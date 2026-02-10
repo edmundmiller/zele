@@ -1,9 +1,10 @@
 // Prisma-based cache for Gmail API responses.
-// Each cache entry is scoped to an account email. TTL-based expiry is checked
-// at read time. All methods are async (Prisma is async).
+// Each cache entry is scoped to an (email, app_id) pair. TTL-based expiry is
+// checked at read time. All methods are async (Prisma is async).
 // Single SQLite DB shared across all accounts via the Prisma singleton.
 
 import { getPrisma } from './db.js'
+import type { AccountId } from './auth.js'
 
 // TTL constants in milliseconds
 export const TTL = {
@@ -25,13 +26,14 @@ function isExpired(createdAt: Date, ttlMs: number): boolean {
 // ---------------------------------------------------------------------------
 
 export async function cacheThreadList(
-  email: string,
+  account: AccountId,
   params: { folder?: string; query?: string; maxResults?: number; labelIds?: string[]; pageToken?: string },
   data: unknown,
 ): Promise<void> {
   const prisma = await getPrisma()
   const where = {
-    email,
+    email: account.email,
+    app_id: account.appId,
     folder: params.folder ?? '',
     query: params.query ?? '',
     label_ids: params.labelIds?.join(',') ?? '',
@@ -40,21 +42,22 @@ export async function cacheThreadList(
   }
 
   await prisma.thread_lists.upsert({
-    where: { email_folder_query_label_ids_page_token_max_results: where },
+    where: { email_app_id_folder_query_label_ids_page_token_max_results: where },
     create: { ...where, data: JSON.stringify(data), ttl_ms: TTL.THREAD_LIST },
     update: { data: JSON.stringify(data), ttl_ms: TTL.THREAD_LIST, created_at: new Date() },
   })
 }
 
 export async function getCachedThreadList<T = unknown>(
-  email: string,
+  account: AccountId,
   params: { folder?: string; query?: string; maxResults?: number; labelIds?: string[]; pageToken?: string },
 ): Promise<T | undefined> {
   const prisma = await getPrisma()
   const row = await prisma.thread_lists.findUnique({
     where: {
-      email_folder_query_label_ids_page_token_max_results: {
-        email,
+      email_app_id_folder_query_label_ids_page_token_max_results: {
+        email: account.email,
+        app_id: account.appId,
         folder: params.folder ?? '',
         query: params.query ?? '',
         label_ids: params.labelIds?.join(',') ?? '',
@@ -68,9 +71,9 @@ export async function getCachedThreadList<T = unknown>(
   return JSON.parse(row.data) as T
 }
 
-export async function invalidateThreadLists(email: string): Promise<void> {
+export async function invalidateThreadLists(account: AccountId): Promise<void> {
   const prisma = await getPrisma()
-  await prisma.thread_lists.deleteMany({ where: { email } })
+  await prisma.thread_lists.deleteMany({ where: { email: account.email, app_id: account.appId } })
 }
 
 // ---------------------------------------------------------------------------
@@ -78,107 +81,107 @@ export async function invalidateThreadLists(email: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function cacheThread(
-  email: string,
+  account: AccountId,
   threadId: string,
   data: unknown,
 ): Promise<void> {
   const prisma = await getPrisma()
   await prisma.threads.upsert({
-    where: { email_thread_id: { email, thread_id: threadId } },
-    create: { email, thread_id: threadId, data: JSON.stringify(data), ttl_ms: TTL.THREAD },
+    where: { email_app_id_thread_id: { email: account.email, app_id: account.appId, thread_id: threadId } },
+    create: { email: account.email, app_id: account.appId, thread_id: threadId, data: JSON.stringify(data), ttl_ms: TTL.THREAD },
     update: { data: JSON.stringify(data), ttl_ms: TTL.THREAD, created_at: new Date() },
   })
 }
 
 export async function getCachedThread<T = unknown>(
-  email: string,
+  account: AccountId,
   threadId: string,
 ): Promise<T | undefined> {
   const prisma = await getPrisma()
   const row = await prisma.threads.findUnique({
-    where: { email_thread_id: { email, thread_id: threadId } },
+    where: { email_app_id_thread_id: { email: account.email, app_id: account.appId, thread_id: threadId } },
   })
 
   if (!row || isExpired(row.created_at, row.ttl_ms)) return undefined
   return JSON.parse(row.data) as T
 }
 
-export async function invalidateThread(email: string, threadId: string): Promise<void> {
+export async function invalidateThread(account: AccountId, threadId: string): Promise<void> {
   const prisma = await getPrisma()
-  await prisma.threads.deleteMany({ where: { email, thread_id: threadId } })
+  await prisma.threads.deleteMany({ where: { email: account.email, app_id: account.appId, thread_id: threadId } })
 }
 
-export async function invalidateThreads(email: string, threadIds: string[]): Promise<void> {
+export async function invalidateThreads(account: AccountId, threadIds: string[]): Promise<void> {
   const prisma = await getPrisma()
-  await prisma.threads.deleteMany({ where: { email, thread_id: { in: threadIds } } })
+  await prisma.threads.deleteMany({ where: { email: account.email, app_id: account.appId, thread_id: { in: threadIds } } })
 }
 
 // ---------------------------------------------------------------------------
 // Labels cache
 // ---------------------------------------------------------------------------
 
-export async function cacheLabels(email: string, data: unknown): Promise<void> {
+export async function cacheLabels(account: AccountId, data: unknown): Promise<void> {
   const prisma = await getPrisma()
   await prisma.labels.upsert({
-    where: { email },
-    create: { email, data: JSON.stringify(data), ttl_ms: TTL.LABELS },
+    where: { email_app_id: { email: account.email, app_id: account.appId } },
+    create: { email: account.email, app_id: account.appId, data: JSON.stringify(data), ttl_ms: TTL.LABELS },
     update: { data: JSON.stringify(data), ttl_ms: TTL.LABELS, created_at: new Date() },
   })
 }
 
-export async function getCachedLabels<T = unknown>(email: string): Promise<T | undefined> {
+export async function getCachedLabels<T = unknown>(account: AccountId): Promise<T | undefined> {
   const prisma = await getPrisma()
-  const row = await prisma.labels.findUnique({ where: { email } })
+  const row = await prisma.labels.findUnique({ where: { email_app_id: { email: account.email, app_id: account.appId } } })
   if (!row || isExpired(row.created_at, row.ttl_ms)) return undefined
   return JSON.parse(row.data) as T
 }
 
-export async function invalidateLabels(email: string): Promise<void> {
+export async function invalidateLabels(account: AccountId): Promise<void> {
   const prisma = await getPrisma()
-  await prisma.labels.deleteMany({ where: { email } })
+  await prisma.labels.deleteMany({ where: { email: account.email, app_id: account.appId } })
 }
 
 // ---------------------------------------------------------------------------
 // Label counts cache
 // ---------------------------------------------------------------------------
 
-export async function cacheLabelCounts(email: string, data: unknown): Promise<void> {
+export async function cacheLabelCounts(account: AccountId, data: unknown): Promise<void> {
   const prisma = await getPrisma()
   await prisma.label_counts.upsert({
-    where: { email },
-    create: { email, data: JSON.stringify(data), ttl_ms: TTL.LABEL_COUNTS },
+    where: { email_app_id: { email: account.email, app_id: account.appId } },
+    create: { email: account.email, app_id: account.appId, data: JSON.stringify(data), ttl_ms: TTL.LABEL_COUNTS },
     update: { data: JSON.stringify(data), ttl_ms: TTL.LABEL_COUNTS, created_at: new Date() },
   })
 }
 
-export async function getCachedLabelCounts<T = unknown>(email: string): Promise<T | undefined> {
+export async function getCachedLabelCounts<T = unknown>(account: AccountId): Promise<T | undefined> {
   const prisma = await getPrisma()
-  const row = await prisma.label_counts.findUnique({ where: { email } })
+  const row = await prisma.label_counts.findUnique({ where: { email_app_id: { email: account.email, app_id: account.appId } } })
   if (!row || isExpired(row.created_at, row.ttl_ms)) return undefined
   return JSON.parse(row.data) as T
 }
 
-export async function invalidateLabelCounts(email: string): Promise<void> {
+export async function invalidateLabelCounts(account: AccountId): Promise<void> {
   const prisma = await getPrisma()
-  await prisma.label_counts.deleteMany({ where: { email } })
+  await prisma.label_counts.deleteMany({ where: { email: account.email, app_id: account.appId } })
 }
 
 // ---------------------------------------------------------------------------
 // Profile cache
 // ---------------------------------------------------------------------------
 
-export async function cacheProfile(email: string, data: unknown): Promise<void> {
+export async function cacheProfile(account: AccountId, data: unknown): Promise<void> {
   const prisma = await getPrisma()
   await prisma.profiles.upsert({
-    where: { email },
-    create: { email, data: JSON.stringify(data), ttl_ms: TTL.PROFILE },
+    where: { email_app_id: { email: account.email, app_id: account.appId } },
+    create: { email: account.email, app_id: account.appId, data: JSON.stringify(data), ttl_ms: TTL.PROFILE },
     update: { data: JSON.stringify(data), ttl_ms: TTL.PROFILE, created_at: new Date() },
   })
 }
 
-export async function getCachedProfile<T = unknown>(email: string): Promise<T | undefined> {
+export async function getCachedProfile<T = unknown>(account: AccountId): Promise<T | undefined> {
   const prisma = await getPrisma()
-  const row = await prisma.profiles.findUnique({ where: { email } })
+  const row = await prisma.profiles.findUnique({ where: { email_app_id: { email: account.email, app_id: account.appId } } })
   if (!row || isExpired(row.created_at, row.ttl_ms)) return undefined
   return JSON.parse(row.data) as T
 }
@@ -187,19 +190,19 @@ export async function getCachedProfile<T = unknown>(email: string): Promise<T | 
 // Sync state (persistent, no TTL)
 // ---------------------------------------------------------------------------
 
-export async function getLastHistoryId(email: string): Promise<string | undefined> {
+export async function getLastHistoryId(account: AccountId): Promise<string | undefined> {
   const prisma = await getPrisma()
   const row = await prisma.sync_states.findUnique({
-    where: { email_key: { email, key: 'history_id' } },
+    where: { email_app_id_key: { email: account.email, app_id: account.appId, key: 'history_id' } },
   })
   return row?.value
 }
 
-export async function setLastHistoryId(email: string, historyId: string): Promise<void> {
+export async function setLastHistoryId(account: AccountId, historyId: string): Promise<void> {
   const prisma = await getPrisma()
   await prisma.sync_states.upsert({
-    where: { email_key: { email, key: 'history_id' } },
-    create: { email, key: 'history_id', value: historyId },
+    where: { email_app_id_key: { email: account.email, app_id: account.appId, key: 'history_id' } },
+    create: { email: account.email, app_id: account.appId, key: 'history_id', value: historyId },
     update: { value: historyId },
   })
 }
@@ -208,25 +211,25 @@ export async function setLastHistoryId(email: string, historyId: string): Promis
 // Calendar list cache
 // ---------------------------------------------------------------------------
 
-export async function cacheCalendarList(email: string, data: unknown): Promise<void> {
+export async function cacheCalendarList(account: AccountId, data: unknown): Promise<void> {
   const prisma = await getPrisma()
   await prisma.calendar_lists.upsert({
-    where: { email },
-    create: { email, data: JSON.stringify(data), ttl_ms: TTL.CALENDAR_LIST },
+    where: { email_app_id: { email: account.email, app_id: account.appId } },
+    create: { email: account.email, app_id: account.appId, data: JSON.stringify(data), ttl_ms: TTL.CALENDAR_LIST },
     update: { data: JSON.stringify(data), ttl_ms: TTL.CALENDAR_LIST, created_at: new Date() },
   })
 }
 
-export async function getCachedCalendarList<T = unknown>(email: string): Promise<T | undefined> {
+export async function getCachedCalendarList<T = unknown>(account: AccountId): Promise<T | undefined> {
   const prisma = await getPrisma()
-  const row = await prisma.calendar_lists.findUnique({ where: { email } })
+  const row = await prisma.calendar_lists.findUnique({ where: { email_app_id: { email: account.email, app_id: account.appId } } })
   if (!row || isExpired(row.created_at, row.ttl_ms)) return undefined
   return JSON.parse(row.data) as T
 }
 
-export async function invalidateCalendarLists(email: string): Promise<void> {
+export async function invalidateCalendarLists(account: AccountId): Promise<void> {
   const prisma = await getPrisma()
-  await prisma.calendar_lists.deleteMany({ where: { email } })
+  await prisma.calendar_lists.deleteMany({ where: { email: account.email, app_id: account.appId } })
 }
 
 // ---------------------------------------------------------------------------
@@ -234,13 +237,14 @@ export async function invalidateCalendarLists(email: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function cacheCalendarEvents(
-  email: string,
+  account: AccountId,
   params: { calendarId?: string; timeMin?: string; timeMax?: string; query?: string; maxResults?: number; pageToken?: string },
   data: unknown,
 ): Promise<void> {
   const prisma = await getPrisma()
   const where = {
-    email,
+    email: account.email,
+    app_id: account.appId,
     calendar_id: params.calendarId ?? '',
     time_min: params.timeMin ?? '',
     time_max: params.timeMax ?? '',
@@ -250,21 +254,22 @@ export async function cacheCalendarEvents(
   }
 
   await prisma.calendar_events.upsert({
-    where: { email_calendar_id_time_min_time_max_query_max_results_page_token: where },
+    where: { email_app_id_calendar_id_time_min_time_max_query_max_results_page_token: where },
     create: { ...where, data: JSON.stringify(data), ttl_ms: TTL.CALENDAR_EVENTS },
     update: { data: JSON.stringify(data), ttl_ms: TTL.CALENDAR_EVENTS, created_at: new Date() },
   })
 }
 
 export async function getCachedCalendarEvents<T = unknown>(
-  email: string,
+  account: AccountId,
   params: { calendarId?: string; timeMin?: string; timeMax?: string; query?: string; maxResults?: number; pageToken?: string },
 ): Promise<T | undefined> {
   const prisma = await getPrisma()
   const row = await prisma.calendar_events.findUnique({
     where: {
-      email_calendar_id_time_min_time_max_query_max_results_page_token: {
-        email,
+      email_app_id_calendar_id_time_min_time_max_query_max_results_page_token: {
+        email: account.email,
+        app_id: account.appId,
         calendar_id: params.calendarId ?? '',
         time_min: params.timeMin ?? '',
         time_max: params.timeMax ?? '',
@@ -279,12 +284,12 @@ export async function getCachedCalendarEvents<T = unknown>(
   return JSON.parse(row.data) as T
 }
 
-export async function invalidateCalendarEvents(email: string, calendarId?: string): Promise<void> {
+export async function invalidateCalendarEvents(account: AccountId, calendarId?: string): Promise<void> {
   const prisma = await getPrisma()
   if (calendarId) {
-    await prisma.calendar_events.deleteMany({ where: { email, calendar_id: calendarId } })
+    await prisma.calendar_events.deleteMany({ where: { email: account.email, app_id: account.appId, calendar_id: calendarId } })
   } else {
-    await prisma.calendar_events.deleteMany({ where: { email } })
+    await prisma.calendar_events.deleteMany({ where: { email: account.email, app_id: account.appId } })
   }
 }
 
@@ -326,14 +331,15 @@ export async function clearExpired(): Promise<void> {
   )
 }
 
-export async function clearAll(email: string): Promise<void> {
+export async function clearAll(account: AccountId): Promise<void> {
   const prisma = await getPrisma()
-  await prisma.thread_lists.deleteMany({ where: { email } })
-  await prisma.threads.deleteMany({ where: { email } })
-  await prisma.labels.deleteMany({ where: { email } })
-  await prisma.label_counts.deleteMany({ where: { email } })
-  await prisma.profiles.deleteMany({ where: { email } })
-  await prisma.sync_states.deleteMany({ where: { email } })
-  await prisma.calendar_lists.deleteMany({ where: { email } })
-  await prisma.calendar_events.deleteMany({ where: { email } })
+  const where = { email: account.email, app_id: account.appId }
+  await prisma.thread_lists.deleteMany({ where })
+  await prisma.threads.deleteMany({ where })
+  await prisma.labels.deleteMany({ where })
+  await prisma.label_counts.deleteMany({ where })
+  await prisma.profiles.deleteMany({ where })
+  await prisma.sync_states.deleteMany({ where })
+  await prisma.calendar_lists.deleteMany({ where })
+  await prisma.calendar_events.deleteMany({ where })
 }

@@ -13,10 +13,13 @@ enum AccountStatus {
   disabled
 }
 
-// Stores one OAuth credential set per Gmail account email.
-// This is the source of truth for auth state (tokens, refresh metadata).
+// Stores one OAuth credential set per (email, app_id) pair.
+// app_id is the Google OAuth client ID used during login, enabling
+// multiple OAuth apps per email (different quotas, scopes, etc.).
+// Default is the Thunderbird client ID (the original/only client).
 model accounts {
-  email      String   @id
+  email      String
+  app_id     String   @default("406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com")
   account_status AccountStatus @default(active)
   tokens     String // JSON-encoded OAuth2 Credentials
   created_at DateTime @default(now())
@@ -30,6 +33,8 @@ model accounts {
   sync_states      sync_states[]
   calendar_lists   calendar_lists?
   calendar_events  calendar_events[]
+
+  @@id([email, app_id])
 }
 
 // Caches thread list/search responses per account and query parameters.
@@ -37,6 +42,7 @@ model accounts {
 model thread_lists {
   id         Int      @id @default(autoincrement())
   email      String
+  app_id     String   @default("406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com")
   folder     String   @default("")
   query      String   @default("")
   label_ids  String   @default("")
@@ -46,9 +52,9 @@ model thread_lists {
   ttl_ms     Int
   created_at DateTime @default(now())
 
-  account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+  account accounts @relation(fields: [email, app_id], references: [email, app_id], onDelete: Cascade)
 
-  @@unique([email, folder, query, label_ids, page_token, max_results])
+  @@unique([email, app_id, folder, query, label_ids, page_token, max_results])
 }
 
 // Caches hydrated thread payloads per account + thread ID.
@@ -56,58 +62,71 @@ model thread_lists {
 model threads {
   id         Int      @id @default(autoincrement())
   email      String
+  app_id     String   @default("406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com")
   thread_id  String
   data       String // JSON blob of ThreadData
   ttl_ms     Int
   created_at DateTime @default(now())
 
-  account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+  account accounts @relation(fields: [email, app_id], references: [email, app_id], onDelete: Cascade)
 
-  @@unique([email, thread_id])
+  @@unique([email, app_id, thread_id])
 }
 
 // Caches label metadata per account (label id/name/type payload).
 // Used by label list/get and related command outputs.
 model labels {
-  email      String   @id
+  email      String
+  app_id     String   @default("406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com")
   data       String // JSON blob of label list
   ttl_ms     Int
   created_at DateTime @default(now())
 
-  account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+  account accounts @relation(fields: [email, app_id], references: [email, app_id], onDelete: Cascade)
+
+  @@id([email, app_id])
 }
 
 // Caches unread counts per label per account.
 // Used by label counts to avoid recomputing on every invocation.
 model label_counts {
-  email      String   @id
+  email      String
+  app_id     String   @default("406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com")
   data       String // JSON blob of label counts
   ttl_ms     Int
   created_at DateTime @default(now())
 
-  account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+  account accounts @relation(fields: [email, app_id], references: [email, app_id], onDelete: Cascade)
+
+  @@id([email, app_id])
 }
 
 // Caches Gmail profile payload per account (totals/history id).
 // Used by profile command and account metadata lookups.
 model profiles {
-  email      String   @id
+  email      String
+  app_id     String   @default("406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com")
   data       String // JSON blob of profile
   ttl_ms     Int
   created_at DateTime @default(now())
 
-  account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+  account accounts @relation(fields: [email, app_id], references: [email, app_id], onDelete: Cascade)
+
+  @@id([email, app_id])
 }
 
 // Caches calendar list per account.
 // Used by cal list to avoid fetching calendar metadata on every invocation.
 model calendar_lists {
-  email      String   @id
+  email      String
+  app_id     String   @default("406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com")
   data       String // JSON blob of CalendarListItem[]
   ttl_ms     Int
   created_at DateTime @default(now())
 
-  account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+  account accounts @relation(fields: [email, app_id], references: [email, app_id], onDelete: Cascade)
+
+  @@id([email, app_id])
 }
 
 // Caches calendar event list responses per account and query parameters.
@@ -115,6 +134,7 @@ model calendar_lists {
 model calendar_events {
   id          Int      @id @default(autoincrement())
   email       String
+  app_id      String   @default("406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com")
   calendar_id String   @default("")
   time_min    String   @default("")
   time_max    String   @default("")
@@ -125,9 +145,9 @@ model calendar_events {
   ttl_ms      Int
   created_at  DateTime @default(now())
 
-  account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+  account accounts @relation(fields: [email, app_id], references: [email, app_id], onDelete: Cascade)
 
-  @@unique([email, calendar_id, time_min, time_max, query, max_results, page_token])
+  @@unique([email, app_id, calendar_id, time_min, time_max, query, max_results, page_token])
 }
 
 // Allowed keys for sync_states entries.
@@ -143,16 +163,17 @@ enum SyncStateKey {
 //
 // Why generic instead of typed columns/tables:
 // - keeps schema stable while sync features evolve
-// - enables simple upsert by (email, key)
+// - enables simple upsert by (email, app_id, key)
 //
 // If many core sync fields become permanent, consider promoting them to a
 // typed table for stronger validation and query ergonomics.
 model sync_states {
   email String
+  app_id String @default("406964657835-aq8lmia8j95dhl1a2bvharmfk3t1hgqj.apps.googleusercontent.com")
   key   SyncStateKey
   value String
 
-  account accounts @relation(fields: [email], references: [email], onDelete: Cascade)
+  account accounts @relation(fields: [email, app_id], references: [email, app_id], onDelete: Cascade)
 
-  @@id([email, key])
+  @@id([email, app_id, key])
 }

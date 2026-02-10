@@ -19,15 +19,16 @@ export function registerProfileCommands(cli: Goke) {
 
       // Fetch all accounts concurrently, tolerating individual failures
       const settled = await Promise.allSettled(
-        clients.map(async ({ email, client }) => {
+        clients.map(async ({ email, appId, client }) => {
+          const account = { email, appId }
           let profile: Profile | undefined
           if (!options.noCache) {
-            profile = await cache.getCachedProfile<Profile>(email)
+            profile = await cache.getCachedProfile<Profile>(account)
           }
           if (!profile) {
             profile = await client.getProfile()
             if (!options.noCache) {
-              await cache.cacheProfile(email, profile)
+              await cache.cacheProfile(account, profile)
             }
           }
 
