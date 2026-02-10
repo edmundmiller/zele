@@ -1,14 +1,13 @@
 // Calendar commands: list, events, get, create, update, delete, respond, freebusy.
-// Manages Google Calendar with YAML output and cache integration.
+// Manages Google Calendar with YAML output.
+// Cache is handled by the client — commands just call methods and use data.
 // Multi-account: list/events fetch all accounts concurrently and merge by start time.
-// Improved UX over gogcli: multi-account by default, +duration syntax, cleaner output.
 
 import type { Goke } from 'goke'
 import { z } from 'zod'
 import readline from 'node:readline'
 import { getCalendarClients, getCalendarClient } from '../auth.js'
 import type { CalendarClient, CalendarEvent, CalendarListItem, EventListResult } from '../calendar-client.js'
-import * as cache from '../gmail-cache.js'
 import * as out from '../output.js'
 import { resolveTimeRange, parseTimeExpression, parseDuration, isDateOnly } from '../calendar-time.js'
 
@@ -28,19 +27,8 @@ export function registerCalendarCommands(cli: Goke) {
       const clients = await getCalendarClients(options.account)
 
       const settled = await Promise.allSettled(
-        clients.map(async ({ email, appId, client }) => {
-          const account = { email, appId }
-          if (!options.noCache) {
-            const cached = await cache.getCachedCalendarList<CalendarListItem[]>(account)
-            if (cached) return { email, calendars: cached }
-          }
-
-          const calendars = await client.listCalendars()
-
-          if (!options.noCache) {
-            await cache.cacheCalendarList(account, calendars)
-          }
-
+        clients.map(async ({ email, client }) => {
+          const calendars = await client.listCalendars({ noCache: options.noCache })
           return { email, calendars }
         }),
       )
@@ -117,8 +105,7 @@ export function registerCalendarCommands(cli: Goke) {
       }
 
       const settled = await Promise.allSettled(
-        clients.map(async ({ email, appId, client }) => {
-          const account = { email, appId }
+        clients.map(async ({ email, client }) => {
           const tz = await client.getTimezone(calendarId)
           const { timeMin, timeMax } = resolveTimeRange({
             from: options.from,
@@ -129,25 +116,11 @@ export function registerCalendarCommands(cli: Goke) {
             days: options.days,
           }, tz)
 
-          const cacheParams = {
-            calendarId: options.all ? '__all__' : calendarId,
-            timeMin,
-            timeMax,
-            query: options.query,
-            maxResults: max,
-            pageToken: options.page,
-          }
-
-          if (!options.noCache) {
-            const cached = await cache.getCachedCalendarEvents<EventListResult>(account, cacheParams)
-            if (cached) return { email, result: cached, tz }
-          }
-
           let result: EventListResult
 
           if (options.all) {
             // Fetch from all calendars
-            const calendars = await client.listCalendars()
+            const calendars = await client.listCalendars({ noCache: options.noCache })
             const allEvents: CalendarEvent[] = []
 
             const perCalResults = await Promise.allSettled(
@@ -158,6 +131,7 @@ export function registerCalendarCommands(cli: Goke) {
                   timeMax,
                   query: options.query,
                   maxResults: max,
+                  noCache: options.noCache,
                 })
                 return r.events.map((e) => ({ ...e, calendarId: cal.id }))
               }),
@@ -184,11 +158,8 @@ export function registerCalendarCommands(cli: Goke) {
               query: options.query,
               maxResults: max,
               pageToken: options.page,
+              noCache: options.noCache,
             })
-          }
-
-          if (!options.noCache) {
-            await cache.cacheCalendarEvents(account, cacheParams, result)
           }
 
           return { email, result, tz }
@@ -320,8 +291,7 @@ export function registerCalendarCommands(cli: Goke) {
       }
 
       const calendarId = options.calendar ?? 'primary'
-      const { email, appId, client } = await getCalendarClient(options.account)
-      const account = { email, appId }
+      const { client } = await getCalendarClient(options.account)
       const tz = await client.getTimezone(calendarId)
 
       const allDay = options.allDay || (isDateOnly(options.from) && isDateOnly(options.to))
@@ -365,8 +335,6 @@ export function registerCalendarCommands(cli: Goke) {
         visibility: options.visibility,
       })
 
-      await cache.invalidateCalendarEvents(account)
-
       printEventDetail(event)
       out.success('Event created')
     })
@@ -390,8 +358,7 @@ export function registerCalendarCommands(cli: Goke) {
     .option('--visibility <visibility>', 'Event visibility')
     .action(async (eventId, options) => {
       const calendarId = options.calendar ?? 'primary'
-      const { email, appId, client } = await getCalendarClient(options.account)
-      const account = { email, appId }
+      const { client } = await getCalendarClient(options.account)
 
       const addAttendees = options.addAttendees
         ? options.addAttendees.split(',').map((e: string) => e.trim()).filter(Boolean)
@@ -449,8 +416,6 @@ export function registerCalendarCommands(cli: Goke) {
         visibility: options.visibility,
       })
 
-      await cache.invalidateCalendarEvents(account)
-
       printEventDetail(event)
       out.success('Event updated')
     })
@@ -465,8 +430,7 @@ export function registerCalendarCommands(cli: Goke) {
     .option('--force', 'Skip confirmation')
     .action(async (eventId, options) => {
       const calendarId = options.calendar ?? 'primary'
-      const { email, appId, client } = await getCalendarClient(options.account)
-      const account = { email, appId }
+      const { client } = await getCalendarClient(options.account)
 
       if (!options.force && process.stdin.isTTY) {
         const rl = readline.createInterface({ input: process.stdin, output: process.stderr })
@@ -482,7 +446,6 @@ export function registerCalendarCommands(cli: Goke) {
       }
 
       await client.deleteEvent({ calendarId, eventId })
-      await cache.invalidateCalendarEvents(account)
 
       out.printYaml({ deleted: true, id: eventId })
       out.success('Event deleted')
@@ -510,8 +473,7 @@ export function registerCalendarCommands(cli: Goke) {
       }
 
       const calendarId = options.calendar ?? 'primary'
-      const { email, appId, client } = await getCalendarClient(options.account)
-      const account = { email, appId }
+      const { client } = await getCalendarClient(options.account)
 
       const event = await client.respondToEvent({
         calendarId,
@@ -519,8 +481,6 @@ export function registerCalendarCommands(cli: Goke) {
         status: options.status as 'accepted' | 'declined' | 'tentative',
         comment: options.comment,
       })
-
-      await cache.invalidateCalendarEvents(account)
 
       out.printYaml({
         id: event.id,

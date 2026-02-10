@@ -1,18 +1,18 @@
 // Gmail API client for CLI/TUI use.
 // Wraps the @googleapis/gmail SDK with structured methods, object params, and inferred return types.
 // No abstract interfaces, no RPC layer — just a concrete class for Gmail.
-// Ported from Zero's GoogleMailManager (apps/server/src/lib/driver/google.ts) with CLI adaptations:
-//   - No HTML sanitization (CLI renders text)
-//   - No Effect library (simple retry loop)
-//   - Uses batchModify for label mutations (more efficient than per-thread modify)
-//   - Body decoding inline with Buffer (no base64-js dependency)
-//   - Concurrent hydration with configurable concurrency limit
+// Cache is built into the client: read methods check cache first, mutations invalidate.
+// Raw Google API responses are stored in the cache (gmail_v1.Schema$*) so the cache
+// is resilient to changes in our own parsed types. Parsing happens at read time.
+// When account is not provided (bootstrap/login flow), cache is skipped entirely.
 
 import { gmail as gmailApi, type gmail_v1 } from '@googleapis/gmail'
 import type { OAuth2Client } from 'google-auth-library'
 import { createMimeMessage } from 'mimetext'
 import { parseFrom, parseAddressList } from './email-utils.js'
 import { withRetry, mapConcurrent } from './api-utils.js'
+import { getPrisma } from './db.js'
+import type { AccountId } from './auth.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -81,8 +81,16 @@ export interface ThreadListItem {
 
 export interface ThreadListResult {
   threads: ThreadListItem[]
+  /** Raw Google gmail_v1.Schema$Thread metadata responses, parallel to threads[]. */
+  rawThreads: gmail_v1.Schema$Thread[]
   nextPageToken: string | null
   resultSizeEstimate: number
+}
+
+/** Result from getThread() — includes both parsed data and the raw Google response. */
+export interface ThreadResult {
+  parsed: ThreadData
+  raw: gmail_v1.Schema$Thread
 }
 
 // ---------------------------------------------------------------------------
@@ -124,12 +132,198 @@ function encodeBase64Url(data: string | Buffer) {
 // GmailClient
 // ---------------------------------------------------------------------------
 
+// TTL constants in milliseconds
+const TTL = {
+  THREAD_LIST: 5 * 60 * 1000, // 5 minutes
+  THREAD: 30 * 60 * 1000, // 30 minutes
+  LABELS: 30 * 60 * 1000, // 30 minutes
+  PROFILE: 24 * 60 * 60 * 1000, // 24 hours
+  LABEL_COUNTS: 2 * 60 * 1000, // 2 minutes
+} as const
+
+function isExpired(createdAt: Date, ttlMs: number): boolean {
+  return createdAt.getTime() + ttlMs < Date.now()
+}
+
 export class GmailClient {
   private gmail: gmail_v1.Gmail
   private labelIdCache: Record<string, string> = {}
+  private account: AccountId | null
 
-  constructor({ auth }: { auth: OAuth2Client }) {
+  constructor({ auth, account }: { auth: OAuth2Client; account?: AccountId }) {
     this.gmail = gmailApi({ version: 'v1', auth })
+    this.account = account ?? null
+  }
+
+  // =========================================================================
+  // Cache helpers (private) — skip all cache ops when account is null
+  // =========================================================================
+
+  private get cacheEnabled(): boolean {
+    return this.account !== null
+  }
+
+  private async getCachedThreadList(
+    params: { folder?: string; query?: string; maxResults?: number; labelIds?: string[]; pageToken?: string },
+  ): Promise<{ rawThreads: gmail_v1.Schema$Thread[]; nextPageToken: string | null; resultSizeEstimate: number } | undefined> {
+    if (!this.cacheEnabled) return undefined
+    const prisma = await getPrisma()
+    const row = await prisma.threadList.findUnique({
+      where: {
+        email_appId_folder_query_labelIds_pageToken_maxResults: {
+          email: this.account!.email,
+          appId: this.account!.appId,
+          folder: params.folder ?? '',
+          query: params.query ?? '',
+          labelIds: params.labelIds?.join(',') ?? '',
+          pageToken: params.pageToken ?? '',
+          maxResults: params.maxResults ?? 0,
+        },
+      },
+    })
+    if (!row || isExpired(row.createdAt, row.ttlMs)) return undefined
+    return JSON.parse(row.rawData) as { rawThreads: gmail_v1.Schema$Thread[]; nextPageToken: string | null; resultSizeEstimate: number }
+  }
+
+  private async cacheThreadList(
+    params: { folder?: string; query?: string; maxResults?: number; labelIds?: string[]; pageToken?: string },
+    data: { rawThreads: gmail_v1.Schema$Thread[]; nextPageToken: string | null; resultSizeEstimate: number },
+  ): Promise<void> {
+    if (!this.cacheEnabled) return
+    const prisma = await getPrisma()
+    const where = {
+      email: this.account!.email,
+      appId: this.account!.appId,
+      folder: params.folder ?? '',
+      query: params.query ?? '',
+      labelIds: params.labelIds?.join(',') ?? '',
+      pageToken: params.pageToken ?? '',
+      maxResults: params.maxResults ?? 0,
+    }
+    await prisma.threadList.upsert({
+      where: { email_appId_folder_query_labelIds_pageToken_maxResults: where },
+      create: { ...where, rawData: JSON.stringify(data), ttlMs: TTL.THREAD_LIST, createdAt: new Date() },
+      update: { rawData: JSON.stringify(data), ttlMs: TTL.THREAD_LIST, createdAt: new Date() },
+    })
+  }
+
+  async invalidateThreadLists(): Promise<void> {
+    if (!this.cacheEnabled) return
+    const prisma = await getPrisma()
+    await prisma.threadList.deleteMany({ where: { email: this.account!.email, appId: this.account!.appId } })
+  }
+
+  private async getCachedThread(threadId: string): Promise<gmail_v1.Schema$Thread | undefined> {
+    if (!this.cacheEnabled) return undefined
+    const prisma = await getPrisma()
+    const row = await prisma.thread.findUnique({
+      where: { email_appId_threadId: { email: this.account!.email, appId: this.account!.appId, threadId } },
+    })
+    if (!row || isExpired(row.createdAt, row.ttlMs)) return undefined
+    return JSON.parse(row.rawData) as gmail_v1.Schema$Thread
+  }
+
+  private async cacheThreadData(threadId: string, raw: gmail_v1.Schema$Thread, parsed: ThreadData): Promise<void> {
+    if (!this.cacheEnabled) return
+    const prisma = await getPrisma()
+    await prisma.thread.upsert({
+      where: { email_appId_threadId: { email: this.account!.email, appId: this.account!.appId, threadId } },
+      create: {
+        email: this.account!.email, appId: this.account!.appId, threadId,
+        subject: parsed.subject, snippet: parsed.snippet,
+        fromEmail: parsed.from.email, fromName: parsed.from.name ?? '',
+        date: parsed.date, labelIds: parsed.labelIds.join(','),
+        hasUnread: parsed.hasUnread, msgCount: parsed.messageCount,
+        historyId: parsed.historyId,
+        rawData: JSON.stringify(raw), ttlMs: TTL.THREAD, createdAt: new Date(),
+      },
+      update: {
+        subject: parsed.subject, snippet: parsed.snippet,
+        fromEmail: parsed.from.email, fromName: parsed.from.name ?? '',
+        date: parsed.date, labelIds: parsed.labelIds.join(','),
+        hasUnread: parsed.hasUnread, msgCount: parsed.messageCount,
+        historyId: parsed.historyId,
+        rawData: JSON.stringify(raw), ttlMs: TTL.THREAD, createdAt: new Date(),
+      },
+    })
+  }
+
+  async invalidateThreads(threadIds: string[]): Promise<void> {
+    if (!this.cacheEnabled) return
+    const prisma = await getPrisma()
+    await prisma.thread.deleteMany({ where: { email: this.account!.email, appId: this.account!.appId, threadId: { in: threadIds } } })
+  }
+
+  async invalidateThread(threadId: string): Promise<void> {
+    if (!this.cacheEnabled) return
+    const prisma = await getPrisma()
+    await prisma.thread.deleteMany({ where: { email: this.account!.email, appId: this.account!.appId, threadId } })
+  }
+
+  private async getCachedLabels(): Promise<gmail_v1.Schema$Label[] | undefined> {
+    if (!this.cacheEnabled) return undefined
+    const prisma = await getPrisma()
+    const row = await prisma.label.findUnique({ where: { email_appId: { email: this.account!.email, appId: this.account!.appId } } })
+    if (!row || isExpired(row.createdAt, row.ttlMs)) return undefined
+    return JSON.parse(row.rawData) as gmail_v1.Schema$Label[]
+  }
+
+  private async cacheLabelsData(raw: gmail_v1.Schema$Label[]): Promise<void> {
+    if (!this.cacheEnabled) return
+    const prisma = await getPrisma()
+    await prisma.label.upsert({
+      where: { email_appId: { email: this.account!.email, appId: this.account!.appId } },
+      create: { email: this.account!.email, appId: this.account!.appId, rawData: JSON.stringify(raw), ttlMs: TTL.LABELS, createdAt: new Date() },
+      update: { rawData: JSON.stringify(raw), ttlMs: TTL.LABELS, createdAt: new Date() },
+    })
+  }
+
+  async invalidateLabels(): Promise<void> {
+    if (!this.cacheEnabled) return
+    const prisma = await getPrisma()
+    await prisma.label.deleteMany({ where: { email: this.account!.email, appId: this.account!.appId } })
+  }
+
+  private async getCachedLabelCounts(): Promise<{ raw: gmail_v1.Schema$Label[]; archiveEstimate: number | null } | undefined> {
+    if (!this.cacheEnabled) return undefined
+    const prisma = await getPrisma()
+    const row = await prisma.labelCount.findUnique({ where: { email_appId: { email: this.account!.email, appId: this.account!.appId } } })
+    if (!row || isExpired(row.createdAt, row.ttlMs)) return undefined
+    return JSON.parse(row.rawData) as { raw: gmail_v1.Schema$Label[]; archiveEstimate: number | null }
+  }
+
+  private async cacheLabelCountsData(raw: gmail_v1.Schema$Label[], archiveEstimate: number | null): Promise<void> {
+    if (!this.cacheEnabled) return
+    const prisma = await getPrisma()
+    await prisma.labelCount.upsert({
+      where: { email_appId: { email: this.account!.email, appId: this.account!.appId } },
+      create: { email: this.account!.email, appId: this.account!.appId, rawData: JSON.stringify({ raw, archiveEstimate }), ttlMs: TTL.LABEL_COUNTS, createdAt: new Date() },
+      update: { rawData: JSON.stringify({ raw, archiveEstimate }), ttlMs: TTL.LABEL_COUNTS, createdAt: new Date() },
+    })
+  }
+
+  async invalidateLabelCounts(): Promise<void> {
+    if (!this.cacheEnabled) return
+    const prisma = await getPrisma()
+    await prisma.labelCount.deleteMany({ where: { email: this.account!.email, appId: this.account!.appId } })
+  }
+
+  private async getCachedProfile(): Promise<{ emailAddress: string; messagesTotal: number; threadsTotal: number; historyId: string } | undefined> {
+    if (!this.cacheEnabled) return undefined
+    const prisma = await getPrisma()
+    const row = await prisma.profile.findUnique({ where: { email_appId: { email: this.account!.email, appId: this.account!.appId } } })
+    if (!row || isExpired(row.createdAt, row.ttlMs)) return undefined
+    return { emailAddress: row.emailAddress, messagesTotal: row.messagesTotal, threadsTotal: row.threadsTotal, historyId: row.historyId }
+  }
+
+  private async cacheProfileData(profile: { emailAddress: string; messagesTotal: number; threadsTotal: number; historyId: string }): Promise<void> {
+    if (!this.cacheEnabled) return
+    const prisma = await getPrisma()
+    await prisma.profile.upsert({
+      where: { email_appId: { email: this.account!.email, appId: this.account!.appId } },
+      create: { email: this.account!.email, appId: this.account!.appId, ...profile, ttlMs: TTL.PROFILE, createdAt: new Date() },
+      update: { ...profile, ttlMs: TTL.PROFILE, createdAt: new Date() },
+    })
   }
 
   // =========================================================================
@@ -142,13 +336,30 @@ export class GmailClient {
     maxResults = 25,
     labelIds,
     pageToken,
+    noCache = false,
   }: {
     query?: string
     folder?: string
     maxResults?: number
     labelIds?: string[]
     pageToken?: string
+    noCache?: boolean
   } = {}): Promise<ThreadListResult> {
+    const cacheParams = { folder, query, maxResults, labelIds, pageToken }
+
+    // Check cache
+    if (!noCache) {
+      const cached = await this.getCachedThreadList(cacheParams)
+      if (cached) {
+        return {
+          threads: cached.rawThreads.map((raw) => GmailClient.parseRawThreadListItem(raw)),
+          rawThreads: cached.rawThreads,
+          nextPageToken: cached.nextPageToken,
+          resultSizeEstimate: cached.resultSizeEstimate,
+        }
+      }
+    }
+
     const { q, resolvedLabelIds } = this.buildSearchParams(folder, query, labelIds)
 
     const res = await withRetry(() =>
@@ -163,8 +374,8 @@ export class GmailClient {
 
     const rawThreads = res.data.threads ?? []
 
-    // Hydrate with metadata
-    const threads = await mapConcurrent(rawThreads, async (t) => {
+    // Hydrate with metadata — collect both raw and parsed
+    const hydrated = await mapConcurrent(rawThreads, async (t) => {
       if (!t.id) return null
       try {
         const detail = await withRetry(() =>
@@ -175,20 +386,44 @@ export class GmailClient {
             metadataHeaders: ['Subject', 'From', 'Date', 'To'],
           }),
         )
-        return this.parseThreadListItem(t.id, detail.data)
+        return {
+          parsed: this.parseThreadListItem(t.id, detail.data),
+          raw: detail.data,
+        }
       } catch {
         return null
       }
     })
 
-    return {
-      threads: threads.filter((t): t is ThreadListItem => t !== null),
+    const valid = hydrated.filter((t): t is NonNullable<typeof t> => t !== null)
+    const result: ThreadListResult = {
+      threads: valid.map((t) => t.parsed),
+      rawThreads: valid.map((t) => t.raw),
       nextPageToken: res.data.nextPageToken ?? null,
       resultSizeEstimate: res.data.resultSizeEstimate ?? 0,
     }
+
+    // Write cache
+    if (!noCache) {
+      await this.cacheThreadList(cacheParams, {
+        rawThreads: result.rawThreads,
+        nextPageToken: result.nextPageToken,
+        resultSizeEstimate: result.resultSizeEstimate,
+      })
+    }
+
+    return result
   }
 
-  async getThread({ threadId }: { threadId: string }) {
+  async getThread({ threadId, noCache = false }: { threadId: string; noCache?: boolean }): Promise<ThreadResult> {
+    // Check cache
+    if (!noCache) {
+      const cached = await this.getCachedThread(threadId)
+      if (cached) {
+        return { parsed: GmailClient.parseRawThread(cached), raw: cached }
+      }
+    }
+
     const res = await withRetry(() =>
       this.gmail.users.threads.get({
         userId: 'me',
@@ -197,37 +432,15 @@ export class GmailClient {
       }),
     )
 
-    if (!res.data.messages || res.data.messages.length === 0) {
-      return {
-        id: threadId,
-        historyId: res.data.historyId ?? null,
-        messages: [],
-        subject: '',
-        snippet: '',
-        from: { email: '' },
-        date: '',
-        labelIds: [],
-        hasUnread: false,
-        messageCount: 0,
-      } satisfies ThreadData
+    const parsed = GmailClient.parseRawThread(res.data)
+    const result: ThreadResult = { parsed, raw: res.data }
+
+    // Write cache
+    if (!noCache) {
+      await this.cacheThreadData(threadId, res.data, parsed)
     }
 
-    const messages = res.data.messages.map((m) => this.parseMessage(m))
-    const latest = messages.findLast((m) => !m.isDraft) ?? messages[messages.length - 1]!
-    const allLabels = [...new Set(messages.flatMap((m) => m.labelIds))]
-
-    return {
-      id: threadId,
-      historyId: res.data.historyId ?? null,
-      messages,
-      subject: latest.subject,
-      snippet: latest.snippet,
-      from: latest.from,
-      date: latest.date,
-      labelIds: allLabels,
-      hasUnread: messages.some((m) => m.unread),
-      messageCount: messages.filter((m) => !m.isDraft).length,
-    } satisfies ThreadData
+    return result
   }
 
   async getMessage({
@@ -317,6 +530,8 @@ export class GmailClient {
       }),
     )
 
+    await this.invalidateThreadLists()
+
     return res.data
   }
 
@@ -348,42 +563,6 @@ export class GmailClient {
     const res = await withRetry(() =>
       this.gmail.users.drafts.create({
         userId: 'me',
-        requestBody: {
-          message: { raw, threadId },
-        },
-      }),
-    )
-
-    return res.data
-  }
-
-  async updateDraft({
-    draftId,
-    to,
-    subject,
-    body,
-    cc,
-    bcc,
-    threadId,
-    fromEmail,
-    attachments,
-  }: {
-    draftId: string
-    to: Array<{ name?: string; email: string }>
-    subject: string
-    body: string
-    cc?: Array<{ name?: string; email: string }>
-    bcc?: Array<{ name?: string; email: string }>
-    threadId?: string
-    fromEmail?: string
-    attachments?: Array<{ filename: string; mimeType: string; content: Buffer }>
-  }) {
-    const raw = this.buildMimeMessage({ to, subject, body, cc, bcc, attachments, fromEmail })
-
-    const res = await withRetry(() =>
-      this.gmail.users.drafts.update({
-        userId: 'me',
-        id: draftId,
         requestBody: {
           message: { raw, threadId },
         },
@@ -473,6 +652,8 @@ export class GmailClient {
       }),
     )
 
+    await this.invalidateThreadLists()
+
     return res.data
   }
 
@@ -495,6 +676,7 @@ export class GmailClient {
     )
     if (messageIds.length === 0) return
     await this.batchModifyMessages(messageIds, { removeLabelIds: ['UNREAD'] })
+    await this.invalidateAfterThreadMutation(threadIds)
   }
 
   async markAsUnread({ threadIds }: { threadIds: string[] }) {
@@ -503,12 +685,14 @@ export class GmailClient {
     )
     if (messageIds.length === 0) return
     await this.batchModifyMessages(messageIds, { addLabelIds: ['UNREAD'] })
+    await this.invalidateAfterThreadMutation(threadIds)
   }
 
   async star({ threadIds }: { threadIds: string[] }) {
     const messageIds = await this.getMessageIdsForThreads(threadIds)
     if (messageIds.length === 0) return
     await this.batchModifyMessages(messageIds, { addLabelIds: ['STARRED'] })
+    await this.invalidateAfterThreadMutation(threadIds)
   }
 
   async unstar({ threadIds }: { threadIds: string[] }) {
@@ -517,6 +701,7 @@ export class GmailClient {
     )
     if (messageIds.length === 0) return
     await this.batchModifyMessages(messageIds, { removeLabelIds: ['STARRED'] })
+    await this.invalidateAfterThreadMutation(threadIds)
   }
 
   async modifyLabels({
@@ -541,6 +726,7 @@ export class GmailClient {
       addLabelIds: resolvedAdd,
       removeLabelIds: resolvedRemove,
     })
+    await this.invalidateAfterThreadMutation(threadIds)
   }
 
   async trash({ threadId }: { threadId: string }) {
@@ -550,6 +736,7 @@ export class GmailClient {
         id: threadId,
       }),
     )
+    await this.invalidateAfterThreadMutation([threadId])
   }
 
   async untrash({ threadId }: { threadId: string }) {
@@ -559,21 +746,21 @@ export class GmailClient {
         id: threadId,
       }),
     )
+    await this.invalidateAfterThreadMutation([threadId])
   }
 
   async archive({ threadIds }: { threadIds: string[] }) {
     const messageIds = await this.getMessageIdsForThreads(threadIds)
     if (messageIds.length === 0) return
     await this.batchModifyMessages(messageIds, { removeLabelIds: ['INBOX'] })
+    await this.invalidateAfterThreadMutation(threadIds)
   }
 
-  async deleteMessage({ messageId }: { messageId: string }) {
-    await withRetry(() =>
-      this.gmail.users.messages.delete({
-        userId: 'me',
-        id: messageId,
-      }),
-    )
+  /** Invalidate thread + list + label count caches after a thread mutation. */
+  private async invalidateAfterThreadMutation(threadIds: string[]): Promise<void> {
+    await this.invalidateThreads(threadIds)
+    await this.invalidateThreadLists()
+    await this.invalidateLabelCounts()
   }
 
   /** Moves all spam threads to trash. Does not permanently delete. */
@@ -602,6 +789,9 @@ export class GmailClient {
       if (!pageToken) break
     }
 
+    await this.invalidateThreadLists()
+    await this.invalidateLabelCounts()
+
     return { count: totalDeleted }
   }
 
@@ -609,26 +799,27 @@ export class GmailClient {
   // Labels CRUD
   // =========================================================================
 
-  async listLabels() {
+  async listLabels({ noCache = false }: { noCache?: boolean } = {}) {
+    // Check cache
+    if (!noCache) {
+      const cached = await this.getCachedLabels()
+      if (cached) {
+        return { parsed: GmailClient.parseRawLabels(cached), raw: cached }
+      }
+    }
+
     const res = await withRetry(() =>
       this.gmail.users.labels.list({ userId: 'me' }),
     )
 
-    return (
-      res.data.labels?.map((label) => ({
-        id: label.id ?? '',
-        name: label.name ?? '',
-        type: (label.type ?? 'user') as 'system' | 'user',
-        messageListVisibility: label.messageListVisibility ?? null,
-        labelListVisibility: label.labelListVisibility ?? null,
-        color: label.color
-          ? {
-              backgroundColor: label.color.backgroundColor ?? '',
-              textColor: label.color.textColor ?? '',
-            }
-          : null,
-      })) ?? []
-    )
+    const rawLabels = res.data.labels ?? []
+
+    // Write cache
+    if (!noCache) {
+      await this.cacheLabelsData(rawLabels)
+    }
+
+    return { parsed: GmailClient.parseRawLabels(rawLabels), raw: rawLabels }
   }
 
   async getLabel({ labelId }: { labelId: string }) {
@@ -675,33 +866,12 @@ export class GmailClient {
       }),
     )
 
+    await this.invalidateLabels()
+
     return {
       id: res.data.id ?? '',
       name: res.data.name ?? name,
     }
-  }
-
-  async updateLabel({
-    labelId,
-    name,
-    color,
-  }: {
-    labelId: string
-    name?: string
-    color?: { backgroundColor: string; textColor: string }
-  }) {
-    await withRetry(() =>
-      this.gmail.users.labels.update({
-        userId: 'me',
-        id: labelId,
-        requestBody: {
-          name,
-          color,
-        },
-      }),
-    )
-    // Invalidate label ID cache since name may have changed
-    this.labelIdCache = {}
   }
 
   async deleteLabel({ labelId }: { labelId: string }) {
@@ -711,17 +881,30 @@ export class GmailClient {
         id: labelId,
       }),
     )
-    // Invalidate label ID cache
     this.labelIdCache = {}
+    await this.invalidateLabels()
+    await this.invalidateLabelCounts()
   }
 
   // =========================================================================
   // Label counts (unread counts per folder/label)
   // =========================================================================
 
-  async getLabelCounts() {
+  async getLabelCounts({ noCache = false }: { noCache?: boolean } = {}) {
+    // Check cache
+    if (!noCache) {
+      const cached = await this.getCachedLabelCounts()
+      if (cached) {
+        return {
+          parsed: GmailClient.parseRawLabelCounts(cached.raw, cached.archiveEstimate),
+          raw: cached.raw,
+          archiveEstimate: cached.archiveEstimate,
+        }
+      }
+    }
+
     // Fetch label counts and archive count concurrently
-    const [labels, archiveRes] = await Promise.all([
+    const [labelsResult, archiveRes] = await Promise.all([
       this.listLabels(),
       withRetry(() =>
         this.gmail.users.threads.list({
@@ -732,7 +915,9 @@ export class GmailClient {
       ).catch(() => null),
     ])
 
-    const counts = await mapConcurrent(labels, async (label) => {
+    // Fetch detailed counts for each label — collect both raw and parsed
+    const rawDetails: gmail_v1.Schema$Label[] = []
+    const counts = await mapConcurrent(labelsResult.parsed, async (label) => {
       if (!label.id) return null
       try {
         const detail = await withRetry(() =>
@@ -741,6 +926,7 @@ export class GmailClient {
             id: label.id,
           }),
         )
+        rawDetails.push(detail.data)
         const labelName = (detail.data.name ?? detail.data.id ?? '').toLowerCase()
         const isTotalLabel = labelName === 'draft' || labelName === 'sent'
         return {
@@ -762,7 +948,14 @@ export class GmailClient {
       })
     }
 
-    return result
+    const archiveEstimate = archiveRes ? Number(archiveRes.data.resultSizeEstimate ?? 0) : null
+
+    // Write cache
+    if (!noCache) {
+      await this.cacheLabelCountsData(rawDetails, archiveEstimate)
+    }
+
+    return { parsed: result, raw: rawDetails, archiveEstimate }
   }
 
   // =========================================================================
@@ -789,54 +982,263 @@ export class GmailClient {
     return data.replace(/-/g, '+').replace(/_/g, '/')
   }
 
-  async getMessageAttachments({ messageId }: { messageId: string }) {
-    const res = await withRetry(() =>
-      this.gmail.users.messages.get({
-        userId: 'me',
-        id: messageId,
-      }),
-    )
-
-    const parts = res.data.payload?.parts
-    if (!parts) return []
-
-    const attachmentParts = this.findAttachmentParts(parts)
-
-    const attachments = await mapConcurrent(attachmentParts, async (part) => {
-      const attId = part.body?.attachmentId
-      if (!attId) return null
-      try {
-        const data = await this.getAttachment({ messageId, attachmentId: attId })
-        return {
-          filename: part.filename ?? '',
-          mimeType: part.mimeType ?? '',
-          size: Number(part.body?.size ?? 0),
-          attachmentId: attId,
-          data,
-        }
-      } catch {
-        return null
-      }
-    })
-
-    return attachments.filter((a): a is NonNullable<typeof a> => a !== null)
-  }
-
   // =========================================================================
   // Account / profile
   // =========================================================================
 
-  async getProfile() {
+  async getProfile({ noCache = false }: { noCache?: boolean } = {}) {
+    // Check cache
+    if (!noCache) {
+      const cached = await this.getCachedProfile()
+      if (cached) return cached
+    }
+
     const res = await withRetry(() =>
       this.gmail.users.getProfile({ userId: 'me' }),
     )
 
-    return {
+    const profile = {
       emailAddress: res.data.emailAddress ?? '',
       messagesTotal: res.data.messagesTotal ?? 0,
       threadsTotal: res.data.threadsTotal ?? 0,
       historyId: res.data.historyId ?? '',
     }
+
+    // Write cache
+    if (!noCache) {
+      await this.cacheProfileData(profile)
+    }
+
+    return profile
+  }
+
+  // =========================================================================
+  // Static: parse raw Google API responses (used by cache readers)
+  // =========================================================================
+
+  /** Parse a raw gmail_v1.Schema$Thread (format: full) into ThreadData. */
+  static parseRawThread(raw: gmail_v1.Schema$Thread): ThreadData {
+    const messages = (raw.messages ?? []).map((m) => GmailClient.parseRawMessage(m))
+
+    if (messages.length === 0) {
+      return {
+        id: raw.id ?? '',
+        historyId: raw.historyId ?? null,
+        messages: [],
+        subject: '',
+        snippet: '',
+        from: { email: '' },
+        date: '',
+        labelIds: [],
+        hasUnread: false,
+        messageCount: 0,
+      }
+    }
+
+    const latest = messages.findLast((m) => !m.isDraft) ?? messages[messages.length - 1]!
+    const allLabels = [...new Set(messages.flatMap((m) => m.labelIds))]
+
+    return {
+      id: raw.id ?? '',
+      historyId: raw.historyId ?? null,
+      messages,
+      subject: latest.subject,
+      snippet: latest.snippet,
+      from: latest.from,
+      date: latest.date,
+      labelIds: allLabels,
+      hasUnread: messages.some((m) => m.unread),
+      messageCount: messages.filter((m) => !m.isDraft).length,
+    }
+  }
+
+  /** Parse a raw gmail_v1.Schema$Message into ParsedMessage. */
+  static parseRawMessage(message: gmail_v1.Schema$Message): ParsedMessage {
+    const headers = message.payload?.headers ?? []
+    const labelIds = message.labelIds ?? []
+
+    const getHeader = (name: string) =>
+      headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? null
+
+    const fromHeader = getHeader('from') ?? ''
+    const toHeader = getHeader('to') ?? ''
+    const ccHeaders = headers
+      .filter((h) => h.name?.toLowerCase() === 'cc')
+      .map((h) => h.value ?? '')
+      .filter((v) => v.length > 0)
+
+    const { body, mimeType } = GmailClient.extractBodyStatic(message.payload ?? {})
+
+    return {
+      id: message.id ?? '',
+      threadId: message.threadId ?? '',
+      subject: (getHeader('subject') ?? '(no subject)').replace(/"/g, '').trim(),
+      snippet: message.snippet ?? '',
+      from: parseFrom(fromHeader),
+      to: toHeader ? parseAddressList(toHeader) : [],
+      cc:
+        ccHeaders.length > 0
+          ? ccHeaders.filter((h) => h.trim().length > 0).flatMap((h) => parseAddressList(h))
+          : null,
+      bcc: [],
+      replyTo: getHeader('reply-to') ?? undefined,
+      date: getHeader('date') ?? '',
+      labelIds,
+      unread: labelIds.includes('UNREAD'),
+      starred: labelIds.includes('STARRED'),
+      isDraft: labelIds.includes('DRAFT'),
+      messageId: getHeader('message-id') ?? '',
+      inReplyTo: getHeader('in-reply-to') ?? undefined,
+      references: getHeader('references') ?? undefined,
+      listUnsubscribe: getHeader('list-unsubscribe') ?? undefined,
+      body,
+      mimeType,
+      attachments: GmailClient.extractAttachmentMetaStatic(message.payload?.parts ?? []),
+    }
+  }
+
+  /** Parse raw gmail_v1.Schema$Thread (format: metadata) into ThreadListItem. */
+  static parseRawThreadListItem(raw: gmail_v1.Schema$Thread): ThreadListItem {
+    const messages = raw.messages ?? []
+    const latest =
+      messages.findLast((m) => !m.labelIds?.includes('DRAFT')) ?? messages[messages.length - 1]
+
+    const headers = latest?.payload?.headers ?? []
+    const allLabels = [...new Set(messages.flatMap((m) => m.labelIds ?? []))]
+
+    const getHeader = (name: string) =>
+      headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? null
+
+    return {
+      id: raw.id ?? '',
+      historyId: raw.historyId ?? null,
+      snippet: latest?.snippet ?? '',
+      subject: (getHeader('subject') ?? '(no subject)').replace(/"/g, '').trim(),
+      from: parseFrom(getHeader('from') ?? ''),
+      date: getHeader('date') ?? '',
+      labelIds: allLabels,
+      unread: allLabels.includes('UNREAD'),
+      messageCount: messages.filter((m) => !m.labelIds?.includes('DRAFT')).length,
+    }
+  }
+
+  /** Parse raw gmail_v1.Schema$Label[] from labels.list into our label objects. */
+  static parseRawLabels(rawLabels: gmail_v1.Schema$Label[]) {
+    return rawLabels.map((label) => ({
+      id: label.id ?? '',
+      name: label.name ?? '',
+      type: (label.type ?? 'user') as 'system' | 'user',
+      messageListVisibility: label.messageListVisibility ?? null,
+      labelListVisibility: label.labelListVisibility ?? null,
+      color: label.color
+        ? {
+            backgroundColor: label.color.backgroundColor ?? '',
+            textColor: label.color.textColor ?? '',
+          }
+        : null,
+    }))
+  }
+
+  /** Parse raw gmail_v1.Schema$Label[] (with counts) into label count objects. */
+  static parseRawLabelCounts(
+    rawLabels: gmail_v1.Schema$Label[],
+    archiveEstimate: number | null,
+  ) {
+    const result = rawLabels
+      .map((detail) => {
+        const labelName = (detail.name ?? detail.id ?? '').toLowerCase()
+        const isTotalLabel = labelName === 'draft' || labelName === 'sent'
+        return {
+          label: labelName === 'draft' ? 'drafts' : labelName,
+          count: Number(isTotalLabel ? detail.threadsTotal : detail.threadsUnread) || 0,
+        }
+      })
+
+    if (archiveEstimate !== null) {
+      result.push({ label: 'archive', count: archiveEstimate })
+    }
+
+    return result
+  }
+
+  // =========================================================================
+  // Private static: body/attachment extraction (for static parse methods)
+  // =========================================================================
+
+  private static extractBodyStatic(payload: gmail_v1.Schema$MessagePart): {
+    body: string
+    mimeType: string
+  } {
+    if (payload.body?.data) {
+      return {
+        body: decodeBase64Url(payload.body.data),
+        mimeType: payload.mimeType ?? 'text/plain',
+      }
+    }
+
+    if (!payload.parts) {
+      return { body: '', mimeType: 'text/plain' }
+    }
+
+    const htmlBody = GmailClient.findBodyPartStatic(payload.parts, 'text/html')
+    if (htmlBody) {
+      return { body: decodeBase64Url(htmlBody), mimeType: 'text/html' }
+    }
+
+    const textBody = GmailClient.findBodyPartStatic(payload.parts, 'text/plain')
+    if (textBody) {
+      return { body: decodeBase64Url(textBody), mimeType: 'text/plain' }
+    }
+
+    for (const part of payload.parts) {
+      if (part.parts) {
+        const nested = GmailClient.extractBodyStatic(part)
+        if (nested.body) return nested
+      }
+    }
+
+    return { body: '', mimeType: 'text/plain' }
+  }
+
+  private static findBodyPartStatic(parts: gmail_v1.Schema$MessagePart[], mimeType: string): string | null {
+    for (const part of parts) {
+      if (part.mimeType === mimeType && part.body?.data) {
+        return part.body.data
+      }
+      if (part.parts) {
+        const found = GmailClient.findBodyPartStatic(part.parts, mimeType)
+        if (found) return found
+      }
+    }
+    return null
+  }
+
+  private static extractAttachmentMetaStatic(parts: gmail_v1.Schema$MessagePart[]): AttachmentMeta[] {
+    const results: AttachmentMeta[] = []
+
+    for (const part of parts) {
+      if (part.filename && part.filename.length > 0 && part.body?.attachmentId) {
+        const disposition =
+          part.headers?.find((h) => h.name?.toLowerCase() === 'content-disposition')?.value ?? ''
+        const hasContentId = part.headers?.some((h) => h.name?.toLowerCase() === 'content-id')
+        const isInline = disposition.toLowerCase().includes('inline')
+
+        if (!isInline || !hasContentId) {
+          results.push({
+            attachmentId: part.body.attachmentId,
+            filename: part.filename,
+            mimeType: part.mimeType ?? 'application/octet-stream',
+            size: Number(part.body.size ?? 0),
+          })
+        }
+      }
+
+      if (part.parts) {
+        results.push(...GmailClient.extractAttachmentMetaStatic(part.parts))
+      }
+    }
+
+    return results
   }
 
   async getEmailAliases() {
@@ -910,221 +1312,19 @@ export class GmailClient {
     }
   }
 
-  // NOTE: This method wraps Gmail's push notification API (users.watch),
-  // which requires a Google Cloud Pub/Sub topic. Since zele uses borrowed
-  // OAuth credentials (Thunderbird's client ID), we cannot create Pub/Sub
-  // resources on their GCP project. Users would need their own GCP project,
-  // which defeats the zero-config design. The CLI uses History API polling
-  // instead (see src/commands/watch.ts). This method is kept for potential
-  // future use if users bring their own GCP credentials.
-  async watch({
-    topicName,
-    labelIds = ['INBOX'],
-  }: {
-    topicName: string
-    labelIds?: string[]
-  }) {
-    const res = await withRetry(() =>
-      this.gmail.users.watch({
-        userId: 'me',
-        requestBody: {
-          topicName,
-          labelIds,
-        },
-      }),
-    )
-
-    return {
-      historyId: res.data.historyId ?? '',
-      expiration: res.data.expiration ?? '',
-    }
-  }
-
-  async stopWatch() {
-    await withRetry(() =>
-      this.gmail.users.stop({ userId: 'me' }),
-    )
-  }
-
   // =========================================================================
-  // Private: message parsing
+  // Private: message parsing (delegates to static methods)
   // =========================================================================
 
   private parseMessage(message: gmail_v1.Schema$Message): ParsedMessage {
-    const headers = message.payload?.headers ?? []
-    const labelIds = message.labelIds ?? []
-
-    const fromHeader = this.getHeader(headers, 'from') ?? ''
-    const toHeader = this.getHeader(headers, 'to') ?? ''
-    const ccHeaders = this.getHeaderAll(headers, 'cc')
-
-    const { body, mimeType } = this.extractBody(message.payload ?? {})
-
-    return {
-      id: message.id ?? '',
-      threadId: message.threadId ?? '',
-      subject: (this.getHeader(headers, 'subject') ?? '(no subject)').replace(/"/g, '').trim(),
-      snippet: message.snippet ?? '',
-      from: parseFrom(fromHeader),
-      to: toHeader ? parseAddressList(toHeader) : [],
-      cc:
-        ccHeaders.length > 0
-          ? ccHeaders.filter((h) => h.trim().length > 0).flatMap((h) => parseAddressList(h))
-          : null,
-      bcc: [],
-      replyTo: this.getHeader(headers, 'reply-to') ?? undefined,
-      date: this.getHeader(headers, 'date') ?? '',
-      labelIds,
-      unread: labelIds.includes('UNREAD'),
-      starred: labelIds.includes('STARRED'),
-      isDraft: labelIds.includes('DRAFT'),
-      messageId: this.getHeader(headers, 'message-id') ?? '',
-      inReplyTo: this.getHeader(headers, 'in-reply-to') ?? undefined,
-      references: this.getHeader(headers, 'references') ?? undefined,
-      listUnsubscribe: this.getHeader(headers, 'list-unsubscribe') ?? undefined,
-      body,
-      mimeType,
-      attachments: this.extractAttachmentMeta(message.payload?.parts ?? []),
-    }
+    return GmailClient.parseRawMessage(message)
   }
 
   private parseThreadListItem(
     threadId: string,
     thread: gmail_v1.Schema$Thread,
   ): ThreadListItem {
-    const messages = thread.messages ?? []
-    // Use the last non-draft message, or the last message
-    const latest =
-      messages.findLast((m) => !m.labelIds?.includes('DRAFT')) ?? messages[messages.length - 1]
-
-    const headers = latest?.payload?.headers ?? []
-    const allLabels = [...new Set(messages.flatMap((m) => m.labelIds ?? []))]
-
-    return {
-      id: threadId,
-      historyId: thread.historyId ?? null,
-      snippet: latest?.snippet ?? '',
-      subject: (this.getHeader(headers, 'subject') ?? '(no subject)').replace(/"/g, '').trim(),
-      from: parseFrom(this.getHeader(headers, 'from') ?? ''),
-      date: this.getHeader(headers, 'date') ?? '',
-      labelIds: allLabels,
-      unread: allLabels.includes('UNREAD'),
-      messageCount: messages.filter((m) => !m.labelIds?.includes('DRAFT')).length,
-    }
-  }
-
-  // =========================================================================
-  // Private: body extraction
-  // =========================================================================
-
-  private extractBody(payload: gmail_v1.Schema$MessagePart): {
-    body: string
-    mimeType: string
-  } {
-    // Direct body on payload
-    if (payload.body?.data) {
-      return {
-        body: decodeBase64Url(payload.body.data),
-        mimeType: payload.mimeType ?? 'text/plain',
-      }
-    }
-
-    if (!payload.parts) {
-      return { body: '', mimeType: 'text/plain' }
-    }
-
-    // Prefer text/html, fallback to text/plain
-    const htmlBody = this.findBodyPart(payload.parts, 'text/html')
-    if (htmlBody) {
-      return { body: decodeBase64Url(htmlBody), mimeType: 'text/html' }
-    }
-
-    const textBody = this.findBodyPart(payload.parts, 'text/plain')
-    if (textBody) {
-      return { body: decodeBase64Url(textBody), mimeType: 'text/plain' }
-    }
-
-    // Nested multipart (e.g. multipart/alternative inside multipart/mixed)
-    for (const part of payload.parts) {
-      if (part.parts) {
-        const nested = this.extractBody(part)
-        if (nested.body) return nested
-      }
-    }
-
-    return { body: '', mimeType: 'text/plain' }
-  }
-
-  private findBodyPart(parts: gmail_v1.Schema$MessagePart[], mimeType: string): string | null {
-    for (const part of parts) {
-      if (part.mimeType === mimeType && part.body?.data) {
-        return part.body.data
-      }
-      if (part.parts) {
-        const found = this.findBodyPart(part.parts, mimeType)
-        if (found) return found
-      }
-    }
-    return null
-  }
-
-  // =========================================================================
-  // Private: attachment handling
-  // =========================================================================
-
-  private extractAttachmentMeta(parts: gmail_v1.Schema$MessagePart[]): AttachmentMeta[] {
-    const results: AttachmentMeta[] = []
-
-    for (const part of parts) {
-      if (part.filename && part.filename.length > 0 && part.body?.attachmentId) {
-        // Skip inline images (content-disposition: inline with content-id)
-        const disposition =
-          part.headers?.find((h) => h.name?.toLowerCase() === 'content-disposition')?.value ?? ''
-        const hasContentId = part.headers?.some((h) => h.name?.toLowerCase() === 'content-id')
-        const isInline = disposition.toLowerCase().includes('inline')
-
-        if (!isInline || !hasContentId) {
-          results.push({
-            attachmentId: part.body.attachmentId,
-            filename: part.filename,
-            mimeType: part.mimeType ?? 'application/octet-stream',
-            size: Number(part.body.size ?? 0),
-          })
-        }
-      }
-
-      // Recurse into nested parts
-      if (part.parts) {
-        results.push(...this.extractAttachmentMeta(part.parts))
-      }
-    }
-
-    return results
-  }
-
-  private findAttachmentParts(
-    parts: gmail_v1.Schema$MessagePart[],
-  ): gmail_v1.Schema$MessagePart[] {
-    const results: gmail_v1.Schema$MessagePart[] = []
-
-    for (const part of parts) {
-      if (part.filename && part.filename.length > 0 && part.body?.attachmentId) {
-        // Filter out inline CID images (same logic as Zero's findAttachments)
-        const disposition =
-          part.headers?.find((h) => h.name?.toLowerCase() === 'content-disposition')?.value ?? ''
-        const isInline = disposition.toLowerCase().includes('inline')
-        const hasContentId = part.headers?.some((h) => h.name?.toLowerCase() === 'content-id')
-
-        if (!isInline || !hasContentId) {
-          results.push(part)
-        }
-      }
-      if (part.parts) {
-        results.push(...this.findAttachmentParts(part.parts))
-      }
-    }
-
-    return results
+    return GmailClient.parseRawThreadListItem({ ...thread, id: threadId })
   }
 
   // =========================================================================
@@ -1215,7 +1415,7 @@ export class GmailClient {
     if (SYSTEM_LABEL_IDS.has(labelNameOrId)) return labelNameOrId
     if (this.labelIdCache[labelNameOrId]) return this.labelIdCache[labelNameOrId]!
 
-    const labels = await this.listLabels()
+    const { parsed: labels } = await this.listLabels()
     const match = labels.find((l) => l.name.toLowerCase() === labelNameOrId.toLowerCase())
     if (match) {
       this.labelIdCache[labelNameOrId] = match.id
@@ -1230,7 +1430,7 @@ export class GmailClient {
     if (SYSTEM_LABEL_IDS.has(labelNameOrId)) return labelNameOrId
     if (this.labelIdCache[labelNameOrId]) return this.labelIdCache[labelNameOrId]!
 
-    const labels = await this.listLabels()
+    const { parsed: labels } = await this.listLabels()
     const match = labels.find((l) => l.name.toLowerCase() === labelNameOrId.toLowerCase())
     if (match) {
       this.labelIdCache[labelNameOrId] = match.id

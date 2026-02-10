@@ -1,11 +1,10 @@
 // Profile command: show account info.
 // Displays email address, message/thread counts, and aliases as YAML.
+// Cache is handled by the client — commands just call methods and use data.
 // Multi-account: shows all accounts or filtered by --account.
 
 import type { Goke } from 'goke'
 import { getClients } from '../auth.js'
-import { GmailClient } from '../gmail-client.js'
-import * as cache from '../gmail-cache.js'
 import * as out from '../output.js'
 
 export function registerProfileCommands(cli: Goke) {
@@ -15,32 +14,18 @@ export function registerProfileCommands(cli: Goke) {
     .action(async (options) => {
       const clients = await getClients(options.account)
 
-      type Profile = Awaited<ReturnType<GmailClient['getProfile']>>
-
       // Fetch all accounts concurrently, tolerating individual failures
       const settled = await Promise.allSettled(
-        clients.map(async ({ email, appId, client }) => {
-          const account = { email, appId }
-          let profile: Profile | undefined
-          if (!options.noCache) {
-            profile = await cache.getCachedProfile<Profile>(account)
-          }
-          if (!profile) {
-            profile = await client.getProfile()
-            if (!options.noCache) {
-              await cache.cacheProfile(account, profile)
-            }
-          }
-
+        clients.map(async ({ client }) => {
+          const profile = await client.getProfile({ noCache: options.noCache })
           // Always fetch aliases fresh
           const aliases = await client.getEmailAliases()
-
-          return { email, profile, aliases }
+          return { profile, aliases }
         }),
       )
 
       const results = settled
-        .filter((r): r is PromiseFulfilledResult<{ email: string; profile: Profile; aliases: Awaited<ReturnType<GmailClient['getEmailAliases']>> }> => {
+        .filter((r): r is PromiseFulfilledResult<{ profile: Awaited<ReturnType<typeof import('../gmail-client.js').GmailClient.prototype.getProfile>>; aliases: Awaited<ReturnType<typeof import('../gmail-client.js').GmailClient.prototype.getEmailAliases>> }> => {
           if (r.status === 'rejected') {
             out.error(`Failed to fetch profile: ${r.reason}`)
             return false

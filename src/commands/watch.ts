@@ -9,7 +9,7 @@ import { z } from 'zod'
 import { getClients, type AccountId } from '../auth.js'
 import type { GmailClient } from '../gmail-client.js'
 import { mapConcurrent } from '../api-utils.js'
-import * as cache from '../gmail-cache.js'
+import { getPrisma } from '../db.js'
 import * as out from '../output.js'
 
 // ---------------------------------------------------------------------------
@@ -57,12 +57,12 @@ export function registerWatchCommands(cli: Goke) {
       const states = await Promise.all(
         clients.map(async ({ email, appId, client }) => {
           const account: AccountId = { email, appId }
-          let historyId = await cache.getLastHistoryId(account)
+          let historyId = await getLastHistoryId(account)
 
           if (!historyId) {
             const profile = await client.getProfile()
             historyId = profile.historyId
-            await cache.setLastHistoryId(account, historyId)
+            await setLastHistoryId(account, historyId)
             out.hint(`${email}: watching from now (historyId ${historyId})`)
           } else {
             out.hint(`${email}: resuming from historyId ${historyId}`)
@@ -94,7 +94,7 @@ export function registerWatchCommands(cli: Goke) {
                 out.hint(`${state.account.email}: history expired, re-seeding...`)
                 const profile = await state.client.getProfile()
                 state.historyId = profile.historyId
-                await cache.setLastHistoryId(state.account, state.historyId)
+                await setLastHistoryId(state.account, state.historyId)
                 // Retry once after reseed (important for --once mode)
                 return await pollAccount(state, filterLabelId, options.query)
               }
@@ -141,7 +141,7 @@ async function pollAccount(
   // Update stored historyId even if no changes
   if (newHistoryId !== state.historyId) {
     state.historyId = newHistoryId
-    await cache.setLastHistoryId(state.account, newHistoryId)
+    await setLastHistoryId(state.account, newHistoryId)
   }
 
   if (history.length === 0) return []
@@ -353,4 +353,25 @@ function matchesTerm(msg: MatchableMessage, term: QueryTerm): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// ---------------------------------------------------------------------------
+// Sync state helpers (persistent, no TTL — not cache)
+// ---------------------------------------------------------------------------
+
+async function getLastHistoryId(account: AccountId): Promise<string | undefined> {
+  const prisma = await getPrisma()
+  const row = await prisma.syncState.findUnique({
+    where: { email_appId_key: { email: account.email, appId: account.appId, key: 'history_id' } },
+  })
+  return row?.value
+}
+
+async function setLastHistoryId(account: AccountId, historyId: string): Promise<void> {
+  const prisma = await getPrisma()
+  await prisma.syncState.upsert({
+    where: { email_appId_key: { email: account.email, appId: account.appId, key: 'history_id' } },
+    create: { email: account.email, appId: account.appId, key: 'history_id', value: historyId },
+    update: { value: historyId },
+  })
 }

@@ -39,6 +39,8 @@ model Account {
 
 // Caches thread list/search responses per account and query parameters.
 // Used for fast list/search rendering and reduced Gmail API calls.
+// rawData stores the raw Google gmail_v1.Schema$Thread[] metadata responses
+// so the cache is resilient to changes in our own ThreadListResult type.
 model ThreadList {
   id         Int      @id @default(autoincrement())
   email      String
@@ -48,7 +50,7 @@ model ThreadList {
   labelIds   String
   pageToken  String
   maxResults Int
-  data       String // JSON blob of ThreadListResult
+  rawData    String // raw Google API response JSON (gmail_v1.Schema$Thread[])
   ttlMs      Int
   createdAt  DateTime
 
@@ -59,12 +61,24 @@ model ThreadList {
 
 // Caches hydrated thread payloads per account + thread ID.
 // Used by mail read and post-mutation cache invalidation.
+// rawData stores the raw Google gmail_v1.Schema$Thread response (format: full)
+// so the cache is resilient to changes in our own ThreadData type.
+// Indexed columns are extracted for queryability and display.
 model Thread {
   id        Int      @id @default(autoincrement())
   email     String
   appId     String
   threadId  String
-  data      String // JSON blob of ThreadData
+  subject   String   // extracted for display/search
+  snippet   String   // extracted for display
+  fromEmail String   // extracted for filtering
+  fromName  String   // extracted for display
+  date      String   // extracted for sorting (RFC2822 from header)
+  labelIds  String   // comma-separated, extracted for filtering
+  hasUnread Boolean  // extracted for filtering
+  msgCount  Int      // extracted for display
+  historyId String?  // for sync
+  rawData   String   // raw Google API response JSON (gmail_v1.Schema$Thread)
   ttlMs     Int
   createdAt DateTime
 
@@ -75,10 +89,11 @@ model Thread {
 
 // Caches label metadata per account (label id/name/type payload).
 // Used by label list/get and related command outputs.
+// rawData stores the raw Google gmail_v1.Schema$Label[] response.
 model Label {
   email     String
   appId     String
-  data      String // JSON blob of label list
+  rawData   String // raw Google API response JSON (gmail_v1.Schema$Label[])
   ttlMs     Int
   createdAt DateTime
 
@@ -89,10 +104,12 @@ model Label {
 
 // Caches unread counts per label per account.
 // Used by label counts to avoid recomputing on every invocation.
+// rawData stores the raw Google gmail_v1.Schema$Label[] detail responses
+// (including messagesTotal/threadsUnread counts).
 model LabelCount {
   email     String
   appId     String
-  data      String // JSON blob of label counts
+  rawData   String // raw Google API response JSON (gmail_v1.Schema$Label[] with counts)
   ttlMs     Int
   createdAt DateTime
 
@@ -103,12 +120,16 @@ model LabelCount {
 
 // Caches Gmail profile payload per account (totals/history id).
 // Used by profile command and account metadata lookups.
+// Fully flattened — no JSON blob needed, only 4 fields from Google.
 model Profile {
-  email     String
-  appId     String
-  data      String // JSON blob of profile
-  ttlMs     Int
-  createdAt DateTime
+  email         String
+  appId         String
+  emailAddress  String   // from Gmail API
+  messagesTotal Int      // from Gmail API
+  threadsTotal  Int      // from Gmail API
+  historyId     String   // from Gmail API
+  ttlMs         Int
+  createdAt     DateTime
 
   account Account @relation(fields: [email, appId], references: [email, appId], onDelete: Cascade)
 
@@ -117,10 +138,11 @@ model Profile {
 
 // Caches calendar list per account.
 // Used by cal list to avoid fetching calendar metadata on every invocation.
+// rawData stores parsed CalendarListItem[] JSON (not raw tsdav — parsed at write time).
 model CalendarList {
   email     String
   appId     String
-  data      String // JSON blob of CalendarListItem[]
+  rawData   String // JSON blob of CalendarListItem[]
   ttlMs     Int
   createdAt DateTime
 
@@ -131,6 +153,7 @@ model CalendarList {
 
 // Caches calendar event list responses per account and query parameters.
 // Used for fast cal events rendering and reduced Calendar API calls.
+// rawData stores parsed EventListResult JSON (not raw tsdav — parsed at write time).
 model CalendarEvent {
   id         Int      @id @default(autoincrement())
   email      String
@@ -141,7 +164,7 @@ model CalendarEvent {
   query      String
   maxResults Int
   pageToken  String
-  data       String // JSON blob of EventListResult
+  rawData    String // JSON blob of EventListResult
   ttlMs      Int
   createdAt  DateTime
 

@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS "ThreadList" (
     "labelIds" TEXT NOT NULL,
     "pageToken" TEXT NOT NULL,
     "maxResults" INTEGER NOT NULL,
-    "data" TEXT NOT NULL,
+    "rawData" TEXT NOT NULL,
     "ttlMs" INTEGER NOT NULL,
     "createdAt" DATETIME NOT NULL,
     CONSTRAINT "ThreadList_email_appId_fkey" FOREIGN KEY ("email", "appId") REFERENCES "Account" ("email", "appId") ON DELETE CASCADE ON UPDATE CASCADE
@@ -29,7 +29,16 @@ CREATE TABLE IF NOT EXISTS "Thread" (
     "email" TEXT NOT NULL,
     "appId" TEXT NOT NULL,
     "threadId" TEXT NOT NULL,
-    "data" TEXT NOT NULL,
+    "subject" TEXT NOT NULL,
+    "snippet" TEXT NOT NULL,
+    "fromEmail" TEXT NOT NULL,
+    "fromName" TEXT NOT NULL,
+    "date" TEXT NOT NULL,
+    "labelIds" TEXT NOT NULL,
+    "hasUnread" BOOLEAN NOT NULL,
+    "msgCount" INTEGER NOT NULL,
+    "historyId" TEXT,
+    "rawData" TEXT NOT NULL,
     "ttlMs" INTEGER NOT NULL,
     "createdAt" DATETIME NOT NULL,
     CONSTRAINT "Thread_email_appId_fkey" FOREIGN KEY ("email", "appId") REFERENCES "Account" ("email", "appId") ON DELETE CASCADE ON UPDATE CASCADE
@@ -37,7 +46,7 @@ CREATE TABLE IF NOT EXISTS "Thread" (
 CREATE TABLE IF NOT EXISTS "Label" (
     "email" TEXT NOT NULL,
     "appId" TEXT NOT NULL,
-    "data" TEXT NOT NULL,
+    "rawData" TEXT NOT NULL,
     "ttlMs" INTEGER NOT NULL,
     "createdAt" DATETIME NOT NULL,
 
@@ -47,7 +56,7 @@ CREATE TABLE IF NOT EXISTS "Label" (
 CREATE TABLE IF NOT EXISTS "LabelCount" (
     "email" TEXT NOT NULL,
     "appId" TEXT NOT NULL,
-    "data" TEXT NOT NULL,
+    "rawData" TEXT NOT NULL,
     "ttlMs" INTEGER NOT NULL,
     "createdAt" DATETIME NOT NULL,
 
@@ -57,7 +66,10 @@ CREATE TABLE IF NOT EXISTS "LabelCount" (
 CREATE TABLE IF NOT EXISTS "Profile" (
     "email" TEXT NOT NULL,
     "appId" TEXT NOT NULL,
-    "data" TEXT NOT NULL,
+    "emailAddress" TEXT NOT NULL,
+    "messagesTotal" INTEGER NOT NULL,
+    "threadsTotal" INTEGER NOT NULL,
+    "historyId" TEXT NOT NULL,
     "ttlMs" INTEGER NOT NULL,
     "createdAt" DATETIME NOT NULL,
 
@@ -67,7 +79,7 @@ CREATE TABLE IF NOT EXISTS "Profile" (
 CREATE TABLE IF NOT EXISTS "CalendarList" (
     "email" TEXT NOT NULL,
     "appId" TEXT NOT NULL,
-    "data" TEXT NOT NULL,
+    "rawData" TEXT NOT NULL,
     "ttlMs" INTEGER NOT NULL,
     "createdAt" DATETIME NOT NULL,
 
@@ -84,7 +96,7 @@ CREATE TABLE IF NOT EXISTS "CalendarEvent" (
     "query" TEXT NOT NULL,
     "maxResults" INTEGER NOT NULL,
     "pageToken" TEXT NOT NULL,
-    "data" TEXT NOT NULL,
+    "rawData" TEXT NOT NULL,
     "ttlMs" INTEGER NOT NULL,
     "createdAt" DATETIME NOT NULL,
     CONSTRAINT "CalendarEvent_email_appId_fkey" FOREIGN KEY ("email", "appId") REFERENCES "Account" ("email", "appId") ON DELETE CASCADE ON UPDATE CASCADE

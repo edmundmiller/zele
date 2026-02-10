@@ -1,13 +1,13 @@
 // Draft commands: list, create, get, send, delete.
 // Manages Gmail drafts with YAML output for list views.
+// Cache invalidation is handled by the client (sendDraft invalidates threadLists).
 // Multi-account: list fetches all accounts concurrently and merges by date.
 
 import type { Goke } from 'goke'
 import { z } from 'zod'
 import fs from 'node:fs'
 import { getClients, getClient } from '../auth.js'
-import { GmailClient } from '../gmail-client.js'
-import * as cache from '../gmail-cache.js'
+import type { GmailClient } from '../gmail-client.js'
 import * as out from '../output.js'
 import pc from 'picocolors'
 
@@ -42,7 +42,7 @@ export function registerDraftCommands(cli: Goke) {
       )
 
       const allResults = settled
-        .filter((r): r is PromiseFulfilledResult<{ email: string; result: Awaited<ReturnType<GmailClient['listDrafts']>> & { email: string } }> => {
+        .filter((r): r is PromiseFulfilledResult<{ email: string; result: Awaited<ReturnType<GmailClient['listDrafts']>> }> => {
           if (r.status === 'rejected') {
             out.error(`Failed to fetch drafts: ${r.reason}`)
             return false
@@ -167,12 +167,8 @@ export function registerDraftCommands(cli: Goke) {
   cli
     .command('draft send <draftId>', 'Send a draft')
     .action(async (draftId, options) => {
-      const { email, appId, client } = await getClient(options.account)
-      const account = { email, appId }
-
+      const { client } = await getClient(options.account)
       const result = await client.sendDraft({ draftId })
-
-      await cache.invalidateThreadLists(account)
 
       out.printYaml(result)
       out.success('Draft sent')

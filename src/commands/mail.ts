@@ -1,14 +1,13 @@
 // Mail commands: list, search, read, send, reply, forward.
-// Core email operations wrapping GmailClient with cache-first reads
-// and YAML output for list views.
+// Core email operations wrapping GmailClient with YAML output for list views.
+// Cache is handled by the client — commands just call methods and use data.
 // Multi-account: list/search fetch all accounts concurrently and merge by date.
 
 import type { Goke } from 'goke'
 import { z } from 'zod'
 import fs from 'node:fs'
 import { getClients, getClient } from '../auth.js'
-import { GmailClient, type ThreadData, type ThreadListResult } from '../gmail-client.js'
-import * as cache from '../gmail-cache.js'
+import type { ThreadListResult } from '../gmail-client.js'
 import * as out from '../output.js'
 import pc from 'picocolors'
 
@@ -38,35 +37,16 @@ export function registerMailCommands(cli: Goke) {
         process.exit(1)
       }
 
-      const cacheParams = {
-        folder,
-        maxResults: max,
-        labelIds: options.label ? [options.label] : undefined,
-        pageToken: options.page,
-      }
-
       // Fetch from all accounts concurrently, tolerating individual failures
       const settled = await Promise.allSettled(
-        clients.map(async ({ email, appId, client }) => {
-          const account = { email, appId }
-          if (!options.noCache) {
-            const cached = await cache.getCachedThreadList<ThreadListResult>(account, cacheParams)
-            if (cached) {
-              return { email, result: cached }
-            }
-          }
-
+        clients.map(async ({ email, client }) => {
           const result = await client.listThreads({
             folder,
             maxResults: max,
             labelIds: options.label ? [options.label] : undefined,
             pageToken: options.page,
+            noCache: options.noCache,
           })
-
-          if (!options.noCache) {
-            await cache.cacheThreadList(account, cacheParams, result)
-          }
-
           return { email, result }
         }),
       )
@@ -133,6 +113,7 @@ export function registerMailCommands(cli: Goke) {
             query,
             maxResults: max,
             pageToken: options.page,
+            noCache: true, // searches are always fresh
           })
           return { email, result }
         }),
@@ -184,11 +165,10 @@ export function registerMailCommands(cli: Goke) {
     .option('--raw', 'Show raw message (first message only)')
     .option('--no-cache', 'Skip cache')
     .action(async (threadId, options) => {
-      const { email, appId, client } = await getClient(options.account)
-      const account = { email, appId }
+      const { client } = await getClient(options.account)
 
       if (options.raw) {
-        const thread = await client.getThread({ threadId })
+        const { parsed: thread } = await client.getThread({ threadId, noCache: true })
         if (thread.messages.length === 0) {
           out.hint('No messages in thread')
           return
@@ -198,17 +178,7 @@ export function registerMailCommands(cli: Goke) {
         return
       }
 
-      // Cache-first read
-      let thread: ThreadData | undefined
-      if (!options.noCache) {
-        thread = await cache.getCachedThread<ThreadData>(account, threadId)
-      }
-      if (!thread) {
-        thread = await client.getThread({ threadId })
-        if (!options.noCache) {
-          await cache.cacheThread(account, threadId, thread)
-        }
-      }
+      const { parsed: thread } = await client.getThread({ threadId, noCache: options.noCache })
 
       if (thread.messages.length === 0) {
         out.hint('No messages in thread')
@@ -289,8 +259,7 @@ export function registerMailCommands(cli: Goke) {
       const parseEmails = (str: string) =>
         str.split(',').map((e) => e.trim()).filter(Boolean).map((email) => ({ email }))
 
-      const { email, appId, client } = await getClient(options.account)
-      const account = { email, appId }
+      const { client } = await getClient(options.account)
 
       const result = await client.sendMessage({
         to: parseEmails(options.to),
@@ -300,8 +269,6 @@ export function registerMailCommands(cli: Goke) {
         bcc: options.bcc ? parseEmails(options.bcc) : undefined,
         fromEmail: options.from,
       })
-
-      await cache.invalidateThreadLists(account)
 
       out.printYaml(result)
       out.success(`Sent to ${options.to}`)
@@ -319,10 +286,9 @@ export function registerMailCommands(cli: Goke) {
     .option('--all', 'Reply all (include all original recipients)')
     .option('--from <from>', z.string().describe('Send-as alias email'))
     .action(async (threadId, options) => {
-      const { email, appId, client } = await getClient(options.account)
-      const account = { email, appId }
+      const { client } = await getClient(options.account)
 
-      const thread = await client.getThread({ threadId })
+      const { parsed: thread } = await client.getThread({ threadId })
       if (thread.messages.length === 0) {
         out.error('No messages in thread')
         process.exit(1)
@@ -389,8 +355,8 @@ export function registerMailCommands(cli: Goke) {
         fromEmail: options.from,
       })
 
-      await cache.invalidateThread(account, threadId)
-      await cache.invalidateThreadLists(account)
+      // sendMessage already invalidates threadLists; also invalidate this specific thread
+      await client.invalidateThread(threadId)
 
       out.printYaml(result)
       out.success('Reply sent')
@@ -411,10 +377,9 @@ export function registerMailCommands(cli: Goke) {
         process.exit(1)
       }
 
-      const { email, appId, client } = await getClient(options.account)
-      const account = { email, appId }
+      const { client } = await getClient(options.account)
 
-      const thread = await client.getThread({ threadId })
+      const { parsed: thread } = await client.getThread({ threadId })
       if (thread.messages.length === 0) {
         out.error('No messages in thread')
         process.exit(1)
@@ -446,8 +411,6 @@ export function registerMailCommands(cli: Goke) {
         body: fullBody,
         fromEmail: options.from,
       })
-
-      await cache.invalidateThreadLists(account)
 
       out.printYaml(result)
       out.success(`Forwarded to ${options.to}`)

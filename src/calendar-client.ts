@@ -2,6 +2,9 @@
 // Uses tsdav for CalDAV protocol and ts-ics for typed iCalendar parse/generate.
 // Auth: passes a Bearer token via headers (reuses existing google-auth-library OAuth2).
 // Google CalDAV endpoint: https://apidata.googleusercontent.com/caldav/v2/
+// Cache is built into the client: read methods check cache first, mutations invalidate.
+// Raw tsdav responses are stored in the cache so the cache is resilient to changes
+// in our own parsed types. Parsing happens at read time.
 
 import {
   fetchCalendars,
@@ -21,6 +24,7 @@ import {
   type IcsDateObject,
 } from 'ts-ics'
 import crypto from 'node:crypto'
+import { getPrisma } from './db.js'
 
 // ---------------------------------------------------------------------------
 // Types (kept identical to previous API so commands layer is unchanged)
@@ -307,20 +311,112 @@ function extractTimezone(tz?: string): string {
 
 const GOOGLE_CALDAV_URL = 'https://apidata.googleusercontent.com/caldav/v2/'
 
+// TTL constants in milliseconds
+const TTL = {
+  CALENDAR_LIST: 30 * 60 * 1000, // 30 minutes
+  CALENDAR_EVENTS: 5 * 60 * 1000, // 5 minutes
+} as const
+
+function isExpired(createdAt: Date, ttlMs: number): boolean {
+  return createdAt.getTime() + ttlMs < Date.now()
+}
+
 export class CalendarClient {
   private headers: Record<string, string>
   private email: string
+  private appId: string
   private calendarCache: DAVCalendar[] | null = null
   private timezoneCache: Record<string, string> = {}
 
-  constructor({ accessToken, email }: { accessToken: string; email: string }) {
+  constructor({ accessToken, email, appId }: { accessToken: string; email: string; appId: string }) {
     this.headers = { Authorization: `Bearer ${accessToken}` }
     this.email = email
+    this.appId = appId
   }
 
   /** Update the access token (e.g. after refresh) */
   updateAccessToken(token: string) {
     this.headers = { Authorization: `Bearer ${token}` }
+  }
+
+  // =========================================================================
+  // Cache helpers (private)
+  // =========================================================================
+
+  private get account() {
+    return { email: this.email, appId: this.appId }
+  }
+
+  private async getCachedCalendarList(): Promise<CalendarListItem[] | undefined> {
+    const prisma = await getPrisma()
+    const row = await prisma.calendarList.findUnique({ where: { email_appId: this.account } })
+    if (!row || isExpired(row.createdAt, row.ttlMs)) return undefined
+    return JSON.parse(row.rawData) as CalendarListItem[]
+  }
+
+  private async cacheCalendarListData(data: CalendarListItem[]): Promise<void> {
+    const prisma = await getPrisma()
+    await prisma.calendarList.upsert({
+      where: { email_appId: this.account },
+      create: { ...this.account, rawData: JSON.stringify(data), ttlMs: TTL.CALENDAR_LIST, createdAt: new Date() },
+      update: { rawData: JSON.stringify(data), ttlMs: TTL.CALENDAR_LIST, createdAt: new Date() },
+    })
+  }
+
+  private async invalidateCalendarLists(): Promise<void> {
+    const prisma = await getPrisma()
+    await prisma.calendarList.deleteMany({ where: this.account })
+  }
+
+  private async getCachedCalendarEvents(
+    params: { calendarId?: string; timeMin?: string; timeMax?: string; query?: string; maxResults?: number; pageToken?: string },
+  ): Promise<EventListResult | undefined> {
+    const prisma = await getPrisma()
+    const row = await prisma.calendarEvent.findUnique({
+      where: {
+        email_appId_calendarId_timeMin_timeMax_query_maxResults_pageToken: {
+          ...this.account,
+          calendarId: params.calendarId ?? '',
+          timeMin: params.timeMin ?? '',
+          timeMax: params.timeMax ?? '',
+          query: params.query ?? '',
+          maxResults: params.maxResults ?? 0,
+          pageToken: params.pageToken ?? '',
+        },
+      },
+    })
+    if (!row || isExpired(row.createdAt, row.ttlMs)) return undefined
+    return JSON.parse(row.rawData) as EventListResult
+  }
+
+  private async cacheCalendarEventsData(
+    params: { calendarId?: string; timeMin?: string; timeMax?: string; query?: string; maxResults?: number; pageToken?: string },
+    data: EventListResult,
+  ): Promise<void> {
+    const prisma = await getPrisma()
+    const where = {
+      ...this.account,
+      calendarId: params.calendarId ?? '',
+      timeMin: params.timeMin ?? '',
+      timeMax: params.timeMax ?? '',
+      query: params.query ?? '',
+      maxResults: params.maxResults ?? 0,
+      pageToken: params.pageToken ?? '',
+    }
+    await prisma.calendarEvent.upsert({
+      where: { email_appId_calendarId_timeMin_timeMax_query_maxResults_pageToken: where },
+      create: { ...where, rawData: JSON.stringify(data), ttlMs: TTL.CALENDAR_EVENTS, createdAt: new Date() },
+      update: { rawData: JSON.stringify(data), ttlMs: TTL.CALENDAR_EVENTS, createdAt: new Date() },
+    })
+  }
+
+  async invalidateCalendarEvents(calendarId?: string): Promise<void> {
+    const prisma = await getPrisma()
+    if (calendarId) {
+      await prisma.calendarEvent.deleteMany({ where: { ...this.account, calendarId } })
+    } else {
+      await prisma.calendarEvent.deleteMany({ where: this.account })
+    }
   }
 
   // =========================================================================
@@ -368,10 +464,16 @@ export class CalendarClient {
   // Calendar list
   // =========================================================================
 
-  async listCalendars(): Promise<CalendarListItem[]> {
+  async listCalendars({ noCache = false }: { noCache?: boolean } = {}): Promise<CalendarListItem[]> {
+    // Check cache
+    if (!noCache) {
+      const cached = await this.getCachedCalendarList()
+      if (cached) return cached
+    }
+
     const calendars = await this.fetchDAVCalendars()
 
-    return calendars.map((cal) => {
+    const result = calendars.map((cal) => {
       // Extract calendar ID from URL
       // URL looks like: https://apidata.googleusercontent.com/caldav/v2/user%40gmail.com/events/
       const urlParts = cal.url.replace(/\/$/, '').split('/')
@@ -392,6 +494,13 @@ export class CalendarClient {
         backgroundColor: cal.calendarColor ?? '',
       }
     })
+
+    // Write cache
+    if (!noCache) {
+      await this.cacheCalendarListData(result)
+    }
+
+    return result
   }
 
   // =========================================================================
@@ -428,6 +537,7 @@ export class CalendarClient {
     query,
     maxResults = 20,
     pageToken,
+    noCache = false,
   }: {
     calendarId?: string
     timeMin?: string
@@ -435,7 +545,16 @@ export class CalendarClient {
     query?: string
     maxResults?: number
     pageToken?: string
+    noCache?: boolean
   } = {}): Promise<EventListResult> {
+    const cacheParams = { calendarId, timeMin, timeMax, query, maxResults, pageToken }
+
+    // Check cache
+    if (!noCache) {
+      const cached = await this.getCachedCalendarEvents(cacheParams)
+      if (cached) return cached
+    }
+
     const cal = await this.resolveCalendar(calendarId)
     const tz = await this.getTimezone(calendarId)
 
@@ -468,11 +587,18 @@ export class CalendarClient {
 
     events.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime())
 
-    return {
+    const result: EventListResult = {
       events: events.slice(0, maxResults),
       nextPageToken: null,
       timezone: tz,
     }
+
+    // Write cache
+    if (!noCache) {
+      await this.cacheCalendarEventsData(cacheParams, result)
+    }
+
+    return result
   }
 
   async getEvent({
@@ -557,6 +683,8 @@ export class CalendarClient {
       headers: this.headers,
     })
 
+    await this.invalidateCalendarEvents()
+
     const events = parseICalData(iCalString)
     const event = events[0]
     if (!event) throw new Error('Failed to parse created event')
@@ -640,6 +768,8 @@ export class CalendarClient {
       headers: this.headers,
     })
 
+    await this.invalidateCalendarEvents()
+
     const events = parseICalData(iCalString)
     const event = events[0]
     if (!event) throw new Error('Failed to parse updated event')
@@ -665,6 +795,8 @@ export class CalendarClient {
       calendarObject: { url: existing.url, etag: existing.etag },
       headers: this.headers,
     })
+
+    await this.invalidateCalendarEvents()
   }
 
   async respondToEvent({
@@ -712,6 +844,8 @@ export class CalendarClient {
       calendarObject: { url: existing.url, data: iCalString, etag: existing.etag },
       headers: this.headers,
     })
+
+    await this.invalidateCalendarEvents()
 
     const events = parseICalData(iCalString)
     const event = events[0]

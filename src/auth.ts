@@ -407,7 +407,7 @@ export async function getClients(
   const results = await Promise.all(
     filtered.map(async (account) => {
       const auth = await authenticateAccount(account)
-      return { email: account.email, appId: account.appId, client: new GmailClient({ auth }) }
+      return { email: account.email, appId: account.appId, client: new GmailClient({ auth, account }) }
     }),
   )
 
@@ -463,7 +463,7 @@ export async function getCalendarClients(
       const auth = await authenticateAccount(account)
       const { token } = await auth.getAccessToken()
       if (!token) throw new Error(`Failed to get access token for ${account.email}`)
-      return { email: account.email, appId: account.appId, client: new CalendarClient({ accessToken: token, email: account.email }) }
+      return { email: account.email, appId: account.appId, client: new CalendarClient({ accessToken: token, email: account.email, appId: account.appId }) }
     }),
   )
 

@@ -1,12 +1,11 @@
 // Label commands: list, get, create, delete, counts.
-// Manages Gmail labels with YAML output and cache integration.
+// Manages Gmail labels with YAML output.
+// Cache is handled by the client — commands just call methods and use data.
 // Multi-account: list and counts fetch all accounts concurrently and merge.
 
 import type { Goke } from 'goke'
 import { z } from 'zod'
 import { getClients, getClient } from '../auth.js'
-import { GmailClient } from '../gmail-client.js'
-import * as cache from '../gmail-cache.js'
 import * as out from '../output.js'
 
 export function registerLabelCommands(cli: Goke) {
@@ -20,28 +19,16 @@ export function registerLabelCommands(cli: Goke) {
     .action(async (options) => {
       const clients = await getClients(options.account)
 
-      type LabelList = Awaited<ReturnType<GmailClient['listLabels']>>
-
       // Fetch from all accounts concurrently, tolerating individual failures
       const settled = await Promise.allSettled(
-        clients.map(async ({ email, appId, client }) => {
-          const account = { email, appId }
-          if (!options.noCache) {
-            const cached = await cache.getCachedLabels<LabelList>(account)
-            if (cached) return { email, labels: cached }
-          }
-
-          const labels = await client.listLabels()
-          if (!options.noCache) {
-            await cache.cacheLabels(account, labels)
-          }
-
+        clients.map(async ({ email, client }) => {
+          const { parsed: labels } = await client.listLabels({ noCache: options.noCache })
           return { email, labels }
         }),
       )
 
       const allResults = settled
-        .filter((r): r is PromiseFulfilledResult<{ email: string; labels: LabelList }> => {
+        .filter((r): r is PromiseFulfilledResult<{ email: string; labels: ReturnType<typeof import('../gmail-client.js').GmailClient.parseRawLabels> }> => {
           if (r.status === 'rejected') {
             out.error(`Failed to fetch labels: ${r.reason}`)
             return false
@@ -110,8 +97,7 @@ export function registerLabelCommands(cli: Goke) {
     .option('--bg-color <bgColor>', z.string().describe('Background color (hex, e.g. #4986e7)'))
     .option('--text-color <textColor>', z.string().describe('Text color (hex, e.g. #ffffff)'))
     .action(async (name, options) => {
-      const { email, appId, client } = await getClient(options.account)
-      const account = { email, appId }
+      const { client } = await getClient(options.account)
 
       const result = await client.createLabel({
         name,
@@ -119,8 +105,6 @@ export function registerLabelCommands(cli: Goke) {
           ? { backgroundColor: options.bgColor, textColor: options.textColor }
           : undefined,
       })
-
-      await cache.invalidateLabels(account)
 
       out.printYaml(result)
       out.success(`Label created: "${result.name}"`)
@@ -148,13 +132,8 @@ export function registerLabelCommands(cli: Goke) {
         }
       }
 
-      const { email, appId, client } = await getClient(options.account)
-      const account = { email, appId }
-
+      const { client } = await getClient(options.account)
       await client.deleteLabel({ labelId })
-
-      await cache.invalidateLabels(account)
-      await cache.invalidateLabelCounts(account)
 
       out.printYaml({ label_id: labelId, deleted: true })
     })
@@ -169,28 +148,16 @@ export function registerLabelCommands(cli: Goke) {
     .action(async (options) => {
       const clients = await getClients(options.account)
 
-      type CountList = Awaited<ReturnType<GmailClient['getLabelCounts']>>
-
       // Fetch from all accounts concurrently, tolerating individual failures
       const settled = await Promise.allSettled(
-        clients.map(async ({ email, appId, client }) => {
-          const account = { email, appId }
-          if (!options.noCache) {
-            const cached = await cache.getCachedLabelCounts<CountList>(account)
-            if (cached) return { email, counts: cached }
-          }
-
-          const counts = await client.getLabelCounts()
-          if (!options.noCache) {
-            await cache.cacheLabelCounts(account, counts)
-          }
-
+        clients.map(async ({ email, client }) => {
+          const { parsed: counts } = await client.getLabelCounts({ noCache: options.noCache })
           return { email, counts }
         }),
       )
 
       const allResults = settled
-        .filter((r): r is PromiseFulfilledResult<{ email: string; counts: CountList }> => {
+        .filter((r): r is PromiseFulfilledResult<{ email: string; counts: Array<{ label: string; count: number }> }> => {
           if (r.status === 'rejected') {
             out.error(`Failed to fetch counts: ${r.reason}`)
             return false

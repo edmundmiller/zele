@@ -1,15 +1,14 @@
 // Mail action commands: star, unstar, archive, trash, untrash, mark read/unread, label modify.
-// Bulk operations on threads — all invalidate relevant caches after mutation.
+// Bulk operations on threads — cache invalidation is handled by the client methods.
 
 import type { Goke } from 'goke'
 import { z } from 'zod'
 import { getClient } from '../auth.js'
-import { GmailClient } from '../gmail-client.js'
-import * as cache from '../gmail-cache.js'
+import type { GmailClient } from '../gmail-client.js'
 import * as out from '../output.js'
 
 // ---------------------------------------------------------------------------
-// Helper: run a bulk action with cache invalidation
+// Helper: run a bulk action
 // ---------------------------------------------------------------------------
 
 async function bulkAction(
@@ -23,15 +22,8 @@ async function bulkAction(
     process.exit(1)
   }
 
-  const { email, appId, client } = await getClient(accountFilter)
-  const account = { email, appId }
-
+  const { client } = await getClient(accountFilter)
   await fn(client, threadIds)
-
-  // Invalidate caches
-  await cache.invalidateThreads(account, threadIds)
-  await cache.invalidateThreadLists(account)
-  await cache.invalidateLabelCounts(account)
 
   out.printYaml({ action: actionName, thread_ids: threadIds, success: true })
 }
@@ -107,13 +99,8 @@ export function registerMailActionCommands(cli: Goke) {
   cli
     .command('mail trash-spam', 'Trash all spam threads')
     .action(async (options) => {
-      const { email, appId, client } = await getClient(options.account)
-      const account = { email, appId }
-
+      const { client } = await getClient(options.account)
       const result = await client.trashAllSpam()
-
-      await cache.invalidateThreadLists(account)
-      await cache.invalidateLabelCounts(account)
 
       out.printYaml(result)
       out.success(`Trashed ${result.count} spam thread(s)`)
