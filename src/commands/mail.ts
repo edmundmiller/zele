@@ -75,6 +75,7 @@ export function registerMailCommands(cli: Goke) {
       out.printList(
         merged.map((t) => ({
           ...(showAccount ? { account: t.account } : {}),
+          id: t.id,
           flags: out.formatFlags(t),
           from: out.formatSender(t.from),
           subject: t.subject,
@@ -138,6 +139,7 @@ export function registerMailCommands(cli: Goke) {
       out.printList(
         merged.map((t) => ({
           ...(showAccount ? { account: t.account } : {}),
+          id: t.id,
           flags: out.formatFlags(t),
           from: out.formatSender(t.from),
           subject: t.subject,
