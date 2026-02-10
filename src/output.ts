@@ -327,15 +327,15 @@ export function formatFlags(item: { unread?: boolean; starred?: boolean }): stri
 // ---------------------------------------------------------------------------
 
 export function hint(msg: string): void {
-  process.stderr.write(pc.dim(`# ${msg}`) + '\n')
+  console.error(pc.dim(`# ${msg}`))
 }
 
 export function success(msg: string): void {
-  process.stderr.write(pc.green(msg) + '\n')
+  console.error(pc.green(msg))
 }
 
 export function error(msg: string): void {
-  process.stderr.write(pc.red(msg) + '\n')
+  console.error(pc.red(msg))
 }
 
 // ---------------------------------------------------------------------------

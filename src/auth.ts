@@ -157,11 +157,11 @@ async function getAuthCodeFromBrowser(oauth2Client: OAuth2Client, port: number):
     catch: (err) => new Error(String(err), { cause: err }),
   })
 
-  process.stderr.write('\n' + pc.bold('1.') + ' Open this URL to authorize:\n\n')
-  process.stderr.write('   ' + pc.cyan(pc.underline(authUrl)) + '\n\n')
-  process.stderr.write(pc.bold('2.') + ' If running locally, the browser will redirect automatically.\n')
-  process.stderr.write(pc.dim('   If running remotely, the redirect page won\'t load — that\'s fine.') + '\n')
-  process.stderr.write(pc.dim('   Just copy the URL from your browser\'s address bar and paste it below.') + '\n\n')
+  console.error('\n' + pc.bold('1.') + ' Open this URL to authorize:\n')
+  console.error('   ' + pc.cyan(pc.underline(authUrl)) + '\n')
+  console.error(pc.bold('2.') + ' If running locally, the browser will redirect automatically.')
+  console.error(pc.dim('   If running remotely, the redirect page won\'t load — that\'s fine.'))
+  console.error(pc.dim('   Just copy the URL from your browser\'s address bar and paste it below.') + '\n')
 
   return new Promise((resolve, reject) => {
     let resolved = false
@@ -226,8 +226,8 @@ async function getAuthCodeFromBrowser(oauth2Client: OAuth2Client, port: number):
         if (code) {
           finish(code)
         } else {
-          process.stderr.write(pc.yellow('Could not extract authorization code from input.') + '\n')
-          process.stderr.write(pc.dim('Waiting for browser redirect...') + '\n')
+          console.error(pc.yellow('Could not extract authorization code from input.'))
+          console.error(pc.dim('Waiting for browser redirect...'))
         }
       })
     }
@@ -247,7 +247,7 @@ export async function login(appId?: string): Promise<{ email: string; appId: str
   const oauth2Client = createOAuth2Client(appId)
 
   const code = await getAuthCodeFromBrowser(oauth2Client, resolved.redirectPort)
-  process.stderr.write(pc.dim('Got authorization code, exchanging for tokens...') + '\n')
+  console.error(pc.dim('Got authorization code, exchanging for tokens...'))
 
   const { tokens } = await oauth2Client.getToken(code)
   oauth2Client.setCredentials(tokens)
@@ -313,7 +313,7 @@ async function authenticateAccount(account: AccountId): Promise<OAuth2Client> {
   // Refresh if expired — merge to preserve refresh_token which Google
   // often omits from refresh responses
   if (tokens.expiry_date && tokens.expiry_date < Date.now()) {
-    process.stderr.write(pc.dim(`Token expired for ${account.email}, refreshing...`) + '\n')
+    console.error(pc.dim(`Token expired for ${account.email}, refreshing...`))
     const { credentials } = await oauth2Client.refreshAccessToken()
     const merged = { ...tokens, ...credentials }
     oauth2Client.setCredentials(merged)

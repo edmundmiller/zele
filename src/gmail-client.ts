@@ -1891,7 +1891,7 @@ function parseQueryTerms(query: string): QueryTerm[] {
     if (rawOperator && SERVER_ONLY_OPERATORS.has(rawOperator)) {
       if (!warnedOperators.has(rawOperator)) {
         warnedOperators.add(rawOperator)
-        process.stderr.write(`# --query: "${rawOperator}:" is a server-only operator (use "mail search" instead), skipping\n`)
+        console.error(`# --query: "${rawOperator}:" is a server-only operator (use "mail search" instead), skipping`)
       }
       continue
     }
@@ -1899,7 +1899,7 @@ function parseQueryTerms(query: string): QueryTerm[] {
     if (rawOperator && !SUPPORTED_OPERATORS.has(rawOperator)) {
       if (!warnedOperators.has(rawOperator)) {
         warnedOperators.add(rawOperator)
-        process.stderr.write(`# --query: unknown operator "${rawOperator}:", skipping\n`)
+        console.error(`# --query: unknown operator "${rawOperator}:", skipping`)
       }
       continue
     }

@@ -34,7 +34,7 @@ export function registerAuthCommands(cli: Goke) {
       if (!email && emails.length > 1) {
         out.error('Multiple accounts logged in. Specify which to remove:')
         for (const e of emails) {
-          process.stderr.write(`  ${e}\n`)
+          console.error(`  ${e}`)
         }
         process.exit(1)
       }

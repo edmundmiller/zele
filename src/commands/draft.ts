@@ -89,19 +89,19 @@ export function registerDraftCommands(cli: Goke) {
       const draft = await client.getDraft({ draftId })
       if (draft instanceof Error) handleCommandError(draft)
 
-      process.stdout.write(pc.bold(`Draft: ${draft.message.subject}`) + '\n')
-      process.stdout.write(pc.dim(`Draft ID: ${draft.id}`) + '\n')
-      process.stdout.write(`To: ${draft.to.join(', ') || '(none)'}` + '\n')
+      console.log(pc.bold(`Draft: ${draft.message.subject}`))
+      console.log(pc.dim(`Draft ID: ${draft.id}`))
+      console.log(`To: ${draft.to.join(', ') || '(none)'}`)
       if (draft.cc.length > 0) {
-        process.stdout.write(`Cc: ${draft.cc.join(', ')}` + '\n')
+        console.log(`Cc: ${draft.cc.join(', ')}`)
       }
       if (draft.bcc.length > 0) {
-        process.stdout.write(`Bcc: ${draft.bcc.join(', ')}` + '\n')
+        console.log(`Bcc: ${draft.bcc.join(', ')}`)
       }
-      process.stdout.write('\n')
+      console.log()
 
       const body = out.renderEmailBody(draft.message.body, draft.message.mimeType)
-      process.stdout.write(body + '\n')
+      console.log(body)
     })
 
   // =========================================================================

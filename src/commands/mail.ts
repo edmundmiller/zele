@@ -169,7 +169,7 @@ export function registerMailCommands(cli: Goke) {
         }
         const rawMsg = await client.getRawMessage({ messageId: thread.messages[0]!.id })
         if (rawMsg instanceof Error) handleCommandError(rawMsg)
-        process.stdout.write(rawMsg + '\n')
+        console.log(rawMsg)
         return
       }
 
@@ -184,7 +184,7 @@ export function registerMailCommands(cli: Goke) {
       const rule = pc.dim('─'.repeat(w))
 
       // Render thread header
-      process.stdout.write(pc.bold(thread.subject) + '\n')
+      console.log(pc.bold(thread.subject))
       // Collect unique participants
       const participants = new Map<string, string>()
       for (const msg of thread.messages) {
@@ -192,9 +192,9 @@ export function registerMailCommands(cli: Goke) {
         for (const r of msg.to) participants.set(r.email, r.name || r.email)
       }
       const participantStr = [...participants.values()].join(', ')
-      process.stdout.write(pc.dim(`${thread.messageCount} message(s) · ${participantStr}`) + '\n')
-      process.stdout.write(pc.dim(`ID: ${thread.id}`) + '\n')
-      process.stdout.write(rule + '\n\n')
+      console.log(pc.dim(`${thread.messageCount} message(s) · ${participantStr}`))
+      console.log(pc.dim(`ID: ${thread.id}`))
+      console.log(rule + '\n')
 
       // Render each message
       for (const msg of thread.messages) {
@@ -207,12 +207,12 @@ export function registerMailCommands(cli: Goke) {
         if (msg.starred) flagParts.push(pc.yellow('[starred]'))
         const flagStr = flagParts.length > 0 ? ' ' + flagParts.join(' ') : ''
 
-        process.stdout.write(pc.bold(`From: `) + fromStr + flagStr + '\n')
-        process.stdout.write(pc.dim(`  To: ${msg.to.map((t) => t.email).join(', ')}`) + '\n')
+        console.log(pc.bold(`From: `) + fromStr + flagStr)
+        console.log(pc.dim(`  To: ${msg.to.map((t) => t.email).join(', ')}`))
         if (msg.cc && msg.cc.length > 0) {
-          process.stdout.write(pc.dim(`  Cc: ${msg.cc.map((c) => c.email).join(', ')}`) + '\n')
+          console.log(pc.dim(`  Cc: ${msg.cc.map((c) => c.email).join(', ')}`))
         }
-        process.stdout.write(pc.dim(`Date: ${dateStr}`) + '\n')
+        console.log(pc.dim(`Date: ${dateStr}`))
 
         if (msg.attachments.length > 0) {
           const attList = msg.attachments.map((a) => {
@@ -221,14 +221,14 @@ export function registerMailCommands(cli: Goke) {
               : `${(a.size / 1048576).toFixed(1)} MB`
             return `${a.filename} (${size})`
           })
-          process.stdout.write(pc.dim(`Attachments: ${attList.join(', ')}`) + '\n')
+          console.log(pc.dim(`Attachments: ${attList.join(', ')}`))
         }
 
-        process.stdout.write('\n')
+        console.log()
 
         const body = out.renderEmailBody(msg.body, msg.mimeType)
-        process.stdout.write(body + '\n')
-        process.stdout.write('\n' + rule + '\n\n')
+        console.log(body)
+        console.log('\n' + rule + '\n')
       }
     })
 
