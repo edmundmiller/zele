@@ -25,7 +25,7 @@ import {
   useNavigation,
   showFailureToast,
 } from 'termcast'
-import { useCachedPromise } from '@raycast/utils'
+import { useCachedPromise } from '@termcast/utils'
 import { useState, useMemo, useCallback, useEffect } from 'react'
 
 import { getClients, getClient, listAccounts, login, logout } from './auth.js'

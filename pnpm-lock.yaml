@@ -20,6 +20,9 @@ importers:
       '@prisma/client':
         specifier: ^7.3.0
         version: 7.3.0(prisma@7.3.0(@types/react@19.2.13)(better-sqlite3@12.6.2)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(typescript@5.9.3))(typescript@5.9.3)
+      '@termcast/utils':
+        specifier: ^2.2.2
+        version: 2.2.2(@raycast/api@1.104.5(@types/node@25.2.2)(@types/react@19.2.13))(react@19.2.4)
       email-addresses:
         specifier: ^5.0.0
         version: 5.0.0
@@ -69,9 +72,6 @@ importers:
       '@raycast/api':
         specifier: ^1.93.3
         version: 1.104.5(@types/node@25.2.2)(@types/react@19.2.13)
-      '@raycast/utils':
-        specifier: ^1.19.1
-        version: 1.19.1(@raycast/api@1.104.5(@types/node@25.2.2)(@types/react@19.2.13))
       '@types/email-addresses':
         specifier: ^3.0.0
         version: 3.0.0
@@ -1057,11 +1057,6 @@ packages:
       react-devtools:
         optional: true
 
-  '@raycast/utils@1.19.1':
-    resolution: {integrity: sha512-/udUGcTZCgZZwzesmjBkqG5naQZTD/ZLHbqRwkWcF+W97vf9tr9raxKyQjKsdZ17OVllw2T3sHBQsVUdEmCm2g==}
-    peerDependencies:
-      '@raycast/api': '>=1.69.0'
-
   '@rollup/rollup-android-arm-eabi@4.57.1':
     resolution: {integrity: sha512-A6ehUVSiSaaliTxai040ZpZ2zTevHYbvu/lDoeAteHI8QnaosIzm4qwtezfRg1jOYaUmnzLX1AOD6Z+UJjtifg==}
     cpu: [arm]
@@ -1519,9 +1514,6 @@ packages:
 
   core-util-is@1.0.3:
     resolution: {integrity: sha512-ZQBvi1DcpJ4GDqanjucZ2Hj3wEO5pZDS89BWbkcrvdxksJorwUDDZamX9ldFkp9aw2lmBDLgkObEA4DWNJ9FYQ==}
-
-  cross-fetch@3.2.0:
-    resolution: {integrity: sha512-Q+xVJLoGOeIMXZmbUK4HYk+69cQH6LudR0Vu/pRm2YlU/hDV9CiS0gKUMaWY5f2NeUH9C1nV3bsTlCo0FsTV1Q==}
 
   cross-fetch@4.1.0:
     resolution: {integrity: sha512-uKm5PU+MHTootlWEY+mZ4vvXoCn4fLQxT9dSc1sXVMSFkINTJVN8cAQROpwcKm8bJ/c7rgZVIBWzH5T78sNZZw==}
@@ -2232,10 +2224,6 @@ packages:
     engines: {node: '>=18'}
     hasBin: true
 
-  object-hash@3.0.0:
-    resolution: {integrity: sha512-RSn9F68PjH9HqtltsSnqYC1XXoWe9Bju5+213R98cNGttag9q9yAOTzdbsqvIa7aNm5WffBZFpWYr2aWrklWAw==}
-    engines: {node: '>= 6'}
-
   object-inspect@1.13.4:
     resolution: {integrity: sha512-W67iLl4J2EXEGTbfeHCffrjDfitvLANg0UlX3wFUUSTx92KXRFegMHUVgSqE+wvhAbi4WqjGg9czysTV2Epbew==}
     engines: {node: '>= 0.4'}
@@ -2589,12 +2577,6 @@ packages:
   stream-buffers@2.2.0:
     resolution: {integrity: sha512-uyQK/mx5QjHun80FLJTfaWE7JtwfRMKBLkMne6udYOmvH0CawotVa7TfgYHzAnpphn4+TweIx1QKMnRIbipmUg==}
     engines: {node: '>= 0.10.0'}
-
-  stream-chain@2.2.5:
-    resolution: {integrity: sha512-1TJmBx6aSWqZ4tx7aTpBDXK0/e2hhcNSTV8+CbFJtDjbb+I1mZ8lHit0Grw9GRT+6JbIrrDd8esncgBi8aBXGA==}
-
-  stream-json@1.9.1:
-    resolution: {integrity: sha512-uWkjJ+2Nt/LO9Z/JyKZbMusL8Dkh97uUBTv3AJQ74y07lVahLY4eEFsPsE97pxYBwr8nnjMAIch5eqI0gPShyw==}
 
   string-dedent@3.0.2:
     resolution: {integrity: sha512-M4q+HpHCtGXlbyzYDOcOo7V185dlq6YXvGUPcWZqL4vttCX9gFYoWIOxcPd7v5CAYcTJsGLs3ZJCAH2TXONF/g==}
@@ -3883,18 +3865,6 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@raycast/utils@1.19.1(@raycast/api@1.104.5(@types/node@25.2.2)(@types/react@19.2.13))':
-    dependencies:
-      '@raycast/api': 1.104.5(@types/node@25.2.2)(@types/react@19.2.13)
-      cross-fetch: 3.2.0
-      dequal: 2.0.3
-      object-hash: 3.0.0
-      signal-exit: 4.1.0
-      stream-chain: 2.2.5
-      stream-json: 1.9.1
-    transitivePeerDependencies:
-      - encoding
-
   '@rollup/rollup-android-arm-eabi@4.57.1':
     optional: true
 
@@ -4288,12 +4258,6 @@ snapshots:
   core-js-pure@3.48.0: {}
 
   core-util-is@1.0.3: {}
-
-  cross-fetch@3.2.0:
-    dependencies:
-      node-fetch: 2.7.0
-    transitivePeerDependencies:
-      - encoding
 
   cross-fetch@4.1.0:
     dependencies:
@@ -5161,8 +5125,6 @@ snapshots:
       pathe: 2.0.3
       tinyexec: 1.0.2
 
-  object-hash@3.0.0: {}
-
   object-inspect@1.13.4: {}
 
   obug@2.1.1: {}
@@ -5549,12 +5511,6 @@ snapshots:
   std-env@3.10.0: {}
 
   stream-buffers@2.2.0: {}
-
-  stream-chain@2.2.5: {}
-
-  stream-json@1.9.1:
-    dependencies:
-      stream-chain: 2.2.5
 
   string-dedent@3.0.2: {}
 
