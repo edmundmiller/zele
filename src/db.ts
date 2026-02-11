@@ -44,6 +44,13 @@ async function initializePrisma(): Promise<PrismaClient> {
   const adapter = new PrismaLibSql({ url: `file:${DB_PATH}` })
   const prisma = new PrismaClient({ adapter })
 
+  // WAL mode: allows concurrent readers + single writer, persists on the DB file.
+  // busy_timeout: wait up to 5s for locks to clear instead of failing instantly.
+  // Prevents "database is locked" errors when multiple processes (TUI, watch, CLI)
+  // access the DB, or after macOS sleep/wake leaves stale locks.
+  await prisma.$executeRawUnsafe('PRAGMA journal_mode = WAL')
+  await prisma.$executeRawUnsafe('PRAGMA busy_timeout = 5000')
+
   // Run schema.sql — uses CREATE TABLE IF NOT EXISTS so it's idempotent
   await applySchema(prisma)
 
