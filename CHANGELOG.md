@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.5
+
+- **TUI:** Switch `mail-tui` `useCachedPromise` import from `@raycast/utils` to `@termcast/utils` for Termcast-native compatibility
+- **Dependencies:** Bump `@termcast/utils` to `^2.2.6` and remove `@raycast/api` from dev dependencies to avoid Raycast/Bun resolution issues
+- **Build:** Set `noImplicitAny: false` in `tsconfig.json` to keep TypeScript builds green with updated TUI/runtime dependencies
+
 ## 0.3.4
 
 - **Attachments:** Change `attachment list` to accept a `thread-id` and list attachments across all messages in the thread
