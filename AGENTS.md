@@ -1,6 +1,10 @@
+this project uses bun as package manager. the cli should support both bun and node. so use node apis. 
+
+the TUI (the root command) is only supported in bun. our bin file tries to use bun to run the cli if available
+
 ## development
 
-to run the cli locally use `tsx src/cli.ts`
+to run the cli locally use `bun src/cli.ts`
 
 ## goke typing
 
