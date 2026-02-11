@@ -60,11 +60,15 @@ function dateSection(dateStr: string): string {
   if (isNaN(date.getTime())) return 'Older'
 
   const now = new Date()
+  const tenMinutesAgo = new Date(now.getTime() - 10 * 60 * 1000)
+  const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000)
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
   const yesterday = new Date(today.getTime() - 86400000)
   const weekAgo = new Date(today.getTime() - 7 * 86400000)
   const monthAgo = new Date(today.getTime() - 30 * 86400000)
 
+  if (date >= tenMinutesAgo) return 'Last 10 Minutes'
+  if (date >= oneHourAgo) return 'Last Hour'
   if (date >= today) return 'Today'
   if (date >= yesterday) return 'Yesterday'
   if (date >= weekAgo) return 'This Week'
@@ -72,7 +76,7 @@ function dateSection(dateStr: string): string {
   return 'Older'
 }
 
-const SECTION_ORDER = ['Today', 'Yesterday', 'This Week', 'This Month', 'Older']
+const SECTION_ORDER = ['Last 10 Minutes', 'Last Hour', 'Today', 'Yesterday', 'This Week', 'This Month', 'Older']
 
 function threadStatusIcon(thread: ThreadListItem & { starred?: boolean }): { source: typeof Icon[keyof typeof Icon]; tintColor: string } {
   const unread = thread.unread
