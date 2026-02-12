@@ -24,8 +24,8 @@
   "dependencies": {
     "@googleapis/gmail": "^16.1.1",
     "@libsql/client": "^0.15.15",
-    "@prisma/adapter-libsql": "^7.3.0",
-    "@prisma/client": "^7.3.0",
+    "@prisma/adapter-libsql": "7.3.0",
+    "@prisma/client": "7.3.0",
     "@termcast/utils": "^2.2.6",
     "email-addresses": "^5.0.0",
     "email-reply-parser": "^2.3.5",
@@ -58,7 +58,7 @@
     "@types/node": "^25.2.0",
     "@types/react": "^19.1.2",
     "@types/turndown": "^5.0.5",
-    "prisma": "^7.3.0",
+    "prisma": "7.3.0",
     "tsx": "^4.19.4",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"
