@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.11
+
+- **Code Quality:** Add Prettier configuration and format entire codebase for consistent style
+- **Mail TUI:** Swap unread/starred icon colors (unread now yellow, starred now orange) for better visual hierarchy
+- **Dependencies:** Lock Prisma versions to `7.3.0` (remove `^` prefix) for more predictable builds
+
 ## 0.3.10
 
 - **Dependencies:** Bump `termcast` to `^1.3.45`
