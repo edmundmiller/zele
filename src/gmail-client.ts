@@ -352,8 +352,9 @@ export class GmailClient {
 
       const cached = await this.getCachedThread(t.id)
       if (cached && (!t.historyId || !cached.historyId || t.historyId === cached.historyId)) {
+        const parsed = GmailClient.parseRawThreadListItem(cached)
         return {
-          parsed: GmailClient.parseRawThreadListItem(cached),
+          parsed: { ...parsed, from: this.getDisplaySender(cached) ?? parsed.from },
           raw: cached,
         }
       }
@@ -374,8 +375,9 @@ export class GmailClient {
       const parsed = GmailClient.parseRawThread(detail.data)
       await this.cacheThreadData(t.id, detail.data, parsed)
 
+      const listItem = GmailClient.parseRawThreadListItem(detail.data)
       return {
-        parsed: GmailClient.parseRawThreadListItem(detail.data),
+        parsed: { ...listItem, from: this.getDisplaySender(detail.data) ?? listItem.from },
         raw: detail.data,
       }
     })
@@ -1555,7 +1557,43 @@ export class GmailClient {
     threadId: string,
     thread: gmail_v1.Schema$Thread,
   ): ThreadListItem {
-    return GmailClient.parseRawThreadListItem({ ...thread, id: threadId })
+    const parsed = GmailClient.parseRawThreadListItem({ ...thread, id: threadId })
+    return { ...parsed, from: this.getDisplaySender(thread) ?? parsed.from }
+  }
+
+  /** Get the "display sender" for a thread — shows the other party in the conversation
+   *  instead of the user's own email when they sent the latest message.
+   *  Uses SENT label to detect user-authored messages (handles aliases correctly). */
+  private getDisplaySender(raw: gmail_v1.Schema$Thread): Sender | null {
+    if (!this.account?.email) return null
+
+    const messages = raw.messages ?? []
+    const nonDraftMessages = messages.filter((m) => !m.labelIds?.includes('DRAFT'))
+    const latest = nonDraftMessages[nonDraftMessages.length - 1]
+    if (!latest) return null
+
+    // Only override if the latest message is from the user (has SENT label)
+    const latestIsFromUser = latest.labelIds?.includes('SENT') ?? false
+    if (!latestIsFromUser) return null
+
+    const getMsgHeader = (msg: gmail_v1.Schema$Message, name: string) =>
+      msg.payload?.headers?.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value ?? null
+
+    // Find most recent message NOT from the user (no SENT label)
+    const otherPartyMsg = nonDraftMessages.findLast((m) => !m.labelIds?.includes('SENT'))
+
+    if (otherPartyMsg) {
+      const fromHeader = getMsgHeader(otherPartyMsg, 'from')
+      if (fromHeader) return parseFrom(fromHeader)
+    }
+
+    // All messages are from the user — show the recipient(s) instead
+    const firstMsg = nonDraftMessages[0] ?? messages[0]
+    if (!firstMsg) return null
+
+    const toHeader = getMsgHeader(firstMsg, 'to') ?? ''
+    const recipients = parseAddressList(toHeader)
+    return recipients[0] ?? null
   }
 
   // =========================================================================
