@@ -87,8 +87,8 @@ function threadStatusIcon(thread: ThreadListItem & { starred?: boolean }): { sou
   const starred = thread.labelIds?.includes('STARRED') ?? false
 
   if (unread && starred) return { source: Icon.Star, tintColor: Color.Red }
-  if (unread) return { source: Icon.CircleFilled, tintColor: Color.Orange }
-  if (starred) return { source: Icon.Star, tintColor: Color.Yellow }
+  if (unread) return { source: Icon.CircleFilled, tintColor: Color.Yellow }
+  if (starred) return { source: Icon.Star, tintColor: Color.Orange }
   return { source: Icon.Circle, tintColor: Color.SecondaryText }
 }
 
