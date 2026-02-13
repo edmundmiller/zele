@@ -23,19 +23,6 @@ export function registerMailCommands(cli: Goke) {
   // mail (TUI)
   // =========================================================================
 
-  // cli
-  //   .command('mail', 'Browse emails in TUI')
-  //   .action(async () => {
-  //     const accounts = await listAccounts()
-  //     if (accounts.length === 0) {
-  //       const result = await login()
-  //       if (result instanceof Error) handleCommandError(result)
-  //     }
-
-  //     const { renderWithProviders } = await import('termcast')
-  //     const { default: Command } = await import('../mail-tui.js')
-  //     await renderWithProviders(React.createElement(Command))
-  //   })
 
   // =========================================================================
   // mail list
