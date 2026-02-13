@@ -63,6 +63,10 @@ const DEFAULT_PAGE_SIZE = 25
 const MIN_PAGE_SIZE = 10
 const VISIBLE_ROWS_OFFSET = 6
 
+/** Spacing mode for the mail list. 'relaxed' renders each item as 3 lines. */
+const LIST_SPACING_MODE: 'relaxed' | 'compact' = 'relaxed'
+const LINES_PER_ITEM = LIST_SPACING_MODE === 'relaxed' ? 3 : 1
+
 const ACCOUNT_COLORS = [
   Color.Blue,
   Color.Green,
@@ -140,7 +144,9 @@ type MailCursor =
 
 function getPageSizeFromTerminalHeight(rows?: number): number {
   if (typeof rows !== 'number' || rows <= 0) return DEFAULT_PAGE_SIZE
-  return Math.max(MIN_PAGE_SIZE, rows - VISIBLE_ROWS_OFFSET)
+  const visibleRows = rows - VISIBLE_ROWS_OFFSET
+  const itemCount = Math.floor(visibleRows / LINES_PER_ITEM)
+  return Math.max(MIN_PAGE_SIZE, itemCount)
 }
 
 // ---------------------------------------------------------------------------
@@ -901,7 +907,7 @@ export default function Command() {
     <List
       isLoading={isLoading || accounts.isLoading}
       isShowingDetail={isShowingDetail}
-      spacingMode='relaxed'
+      spacingMode={LIST_SPACING_MODE}
       searchBarPlaceholder='Search emails...'
       onSearchTextChange={setSearchText}
       throttle
