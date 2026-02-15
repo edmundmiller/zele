@@ -338,6 +338,7 @@ function openUrlInBrowser(url: string): Error | void {
     return new Error(`Failed to open browser with ${command.bin}`, { cause: child })
   }
 
+  child.on('error', () => {}) // suppress unhandled error event (ENOENT handled by caller)
   child.unref()
 }
 
