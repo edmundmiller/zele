@@ -1,10 +1,68 @@
-this project uses bun as package manager. the cli should support both bun and node. so use node apis. 
+# Hacking on zele
 
-the TUI (the root command) is only supported in bun. our bin file tries to use bun to run the cli if available
+## Getting Started
 
-## development
+### Prerequisites
 
-to run the cli locally use `bun src/cli.ts`
+- **NixOS/Nix users**: Use the provided flake for a batteries-included dev environment
+- **Others**: Install Bun and Node.js manually
+
+### Quick Start with Nix
+
+```bash
+# Enter the dev shell (auto-downloads all dependencies)
+nix develop
+
+# Install Node dependencies
+bun install
+
+# Build the project (compiles TypeScript, generates Prisma client)
+bun run build
+
+# Install globally for testing
+npm install -g .
+
+# Try the CLI
+zele --help
+
+# Try the TUI
+zele
+```
+
+### NixOS-Specific: Prisma Engines
+
+On NixOS, Prisma can't download prebuilt binaries due to dynamic linking issues. The flake automatically:
+- Includes `prisma-engines` from nixpkgs (properly patched for NixOS)
+- Sets `PRISMA_*_BINARY` environment variables pointing to Nix store paths
+- Allows `bun run build` to work without internet access for engine downloads
+
+If you see Prisma errors about missing engines, make sure you're in the `nix develop` shell.
+
+### Manual Setup (non-Nix)
+
+```bash
+# Install Bun (macOS/Linux)
+curl -fsSL https://bun.sh/install | bash
+
+# Install dependencies
+bun install
+
+# Build
+bun run build
+
+# Install globally
+npm install -g .
+```
+
+## Architecture
+
+This project uses bun as package manager. The CLI should support both bun and node (use Node APIs for compatibility).
+
+The TUI (the root command) is **only** supported in Bun. Our bin file tries to use bun to run the cli if available, falling back to node for non-TUI commands.
+
+## Development
+
+To run the CLI locally use `bun src/cli.ts`
 
 ## goke typing
 
