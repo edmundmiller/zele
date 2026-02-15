@@ -79,8 +79,9 @@ function resolveOAuthClient(appId?: string) {
   let redirectPort = ACTIVE_CLIENT.redirectPort
 
   if (appId) {
-    // Look up by client ID value in OAUTH_CLIENTS
+    // Look up by client ID value or by key name (e.g. "gnome", "thunderbird")
     const entry = Object.values(OAUTH_CLIENTS).find((c) => c.clientId === appId)
+      ?? (OAUTH_CLIENTS as Record<string, typeof ACTIVE_CLIENT>)[appId]
     if (entry) {
       clientId = entry.clientId
       clientSecret = entry.clientSecret
